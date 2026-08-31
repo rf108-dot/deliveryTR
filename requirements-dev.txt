@@ -1,0 +1,10 @@
+# Зависимости для разработки и тестов.
+# Не входит в структуру репозитория из ТЗ §16 — добавлено как обычная
+# практика отделения runtime- и dev-зависимостей. Устанавливается поверх
+# requirements.txt: pip install -r requirements-dev.txt
+
+-r requirements.txt
+
+pytest>=8.0,<9.0
+pytest-asyncio>=0.23,<1.0
+fakeredis>=2.21,<3.0

@@ -1,0 +1,24 @@
+# Telegram bot framework
+aiogram>=3.10,<4.0
+
+# Конфигурация и валидация env
+pydantic>=2.6,<3.0
+pydantic-settings>=2.2,<3.0
+
+# Redis: FSM-хранилище (RedisStorage) + в будущем таймеры/распределённые локи
+redis>=5.0,<6.0
+
+# Планировщик тайм-аутов застрявших заказов (задачи — TODO Day 6)
+APScheduler>=3.10,<4.0
+
+# Google Sheets API (меню — чтение, заказы/события — запись)
+google-api-python-client>=2.120,<3.0
+google-auth>=2.28,<3.0
+google-auth-httplib2>=0.2,<1.0
+
+# Google Maps Geocoding API (reverse geocoding — TODO Day 3)
+googlemaps>=4.10,<5.0
+
+# Чтение .env локально (pydantic-settings использует его сам, но держим
+# явно в зависимостях для `python -c` скриптов/скриптов разработчика)
+python-dotenv>=1.0,<2.0
