@@ -136,8 +136,32 @@ async def on_support_question_received(
 # ---------------------------------------------------------------------- #
 
 
+async def _send_admin_reply(
+    message: Message, bot: Bot, target_user_id: int, reply_text: str
+) -> None:
+    """Общая логика отправки ответа клиенту — используется и из
+    cmd_reply (текст сразу в команде), и из
+    on_admin_reply_text_received (текст отдельным сообщением после
+    голой команды, см. docstring waiting_for_reply_text)."""
+    try:
+        await bot.send_message(
+            target_user_id, CLIENT_SUPPORT_REPLY_TEMPLATE.format(text=reply_text)
+        )
+    except TelegramAPIError as exc:
+        logger.warning("Не удалось доставить ответ поддержки клиенту %s: %s", target_user_id, exc)
+        await message.answer(ADMIN_REPLY_DELIVERY_FAILED_MESSAGE.format(user_id=target_user_id))
+        return
+
+    logger.info(
+        "support_reply_sent: admin_id=%s target_user_id=%s",
+        message.from_user.id if message.from_user else "",
+        target_user_id,
+    )
+    await message.answer(ADMIN_REPLY_SENT_ACK)
+
+
 @router.message(F.text.startswith("/reply_"))
-async def cmd_reply(message: Message, settings: Settings, bot: Bot) -> None:
+async def cmd_reply(message: Message, settings: Settings, bot: Bot, state: FSMContext) -> None:
     if not message.from_user or message.from_user.id not in settings.admin_ids:
         return
 
@@ -149,19 +173,48 @@ async def cmd_reply(message: Message, settings: Settings, bot: Bot) -> None:
     reply_text = parts[1].strip() if len(parts) > 1 else ""
 
     if not reply_text:
+        # Живой баг из тестирования: раньше на этом просто отказывали и
+        # забывали — Админ, ожидаемо, дописывал ответ СЛЕДУЮЩИМ обычным
+        # сообщением, и он улетал в fallback, а не клиенту. Теперь
+        # запоминаем, кому нужно ответить, и следующее простое текстовое
+        # сообщение от этого же Админа уйдёт клиенту напрямую.
+        await state.update_data(support_reply_target_user_id=target_user_id)
+        await state.set_state(SupportStates.waiting_for_reply_text)
         await message.answer(ADMIN_REPLY_EMPTY_MESSAGE.format(user_id=target_user_id))
         return
 
-    try:
-        await bot.send_message(
-            target_user_id, CLIENT_SUPPORT_REPLY_TEMPLATE.format(text=reply_text)
-        )
-    except TelegramAPIError as exc:
-        logger.warning("Не удалось доставить ответ поддержки клиенту %s: %s", target_user_id, exc)
-        await message.answer(ADMIN_REPLY_DELIVERY_FAILED_MESSAGE.format(user_id=target_user_id))
+    await state.set_state(None)
+    await _send_admin_reply(message, bot, target_user_id, reply_text)
+
+
+@router.message(StateFilter(SupportStates.waiting_for_reply_text), F.text)
+async def on_admin_reply_text_received(message: Message, settings: Settings, bot: Bot, state: FSMContext) -> None:
+    """Продолжение cmd_reply — см. docstring SupportStates.waiting_for_reply_text.
+
+    Регистрация ПОСЛЕ cmd_reply в этом же роутере важна: если Админ,
+    находясь в этом состоянии, отправит НОВУЮ команду "/reply_[id2] ..."
+    (например, передумал и отвечает другому клиенту) — она должна
+    попасть именно в cmd_reply (тот стоит первым в файле и матчится по
+    F.text.startswith("/reply_") независимо от состояния), а не быть
+    случайно принятой этим хендлером за текст ответа для старого
+    target_user_id. aiogram пробует хендлеры одного роутера в порядке
+    объявления — этот порядок обязателен."""
+    if not message.from_user or message.from_user.id not in settings.admin_ids:
         return
 
-    logger.info(
-        "support_reply_sent: admin_id=%s target_user_id=%s", message.from_user.id, target_user_id
-    )
-    await message.answer(ADMIN_REPLY_SENT_ACK)
+    data = await state.get_data()
+    target_user_id = data.get("support_reply_target_user_id")
+    if target_user_id is None:
+        await state.set_state(None)
+        return
+
+    reply_text = message.text.strip()
+    if not reply_text:
+        # Пустое/пробельное сообщение — не сбрасываем ожидание, даём
+        # попробовать ещё раз (то же поведение, что и у cmd_reply).
+        await message.answer(ADMIN_REPLY_EMPTY_MESSAGE.format(user_id=target_user_id))
+        return
+
+    await state.set_state(None)
+    await state.update_data(support_reply_target_user_id=None)
+    await _send_admin_reply(message, bot, target_user_id, reply_text)
