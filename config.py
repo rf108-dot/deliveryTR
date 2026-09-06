@@ -139,6 +139,21 @@ class Settings(BaseSettings):
     @field_validator("REDIS_URL")
     @classmethod
     def _validate_redis_url(cls, value: str) -> str:
+        # Живой баг деплоя в Railway: при подстановке значения через
+        # Reference-механизм ("+ New Variable" → выбор REDIS_URL из
+        # сервиса Redis) панель Railway у части пользователей сохраняет
+        # значение переменной вместе с её собственным именем —
+        # REDIS_URL="REDIS_URL=redis://..." — вместо чистого
+        # "redis://...". Воспроизведено многократно через UI (обычное
+        # редактирование, удаление+пересоздание, Reference-выбор из
+        # выпадающего списка) — ни один способ через интерфейс не помог,
+        # значение раз за разом сохранялось с дублирующимся префиксом.
+        # Не гадаем больше с UI — прощаем этот конкретный кривой формат
+        # на уровне валидации, а не роняем весь процесс на старте из-за
+        # чужой особенности панели управления.
+        if value.startswith("REDIS_URL="):
+            value = value[len("REDIS_URL=") :]
+
         if not value.startswith(("redis://", "rediss://", "unix://")):
             raise ValueError(
                 f'REDIS_URL="{value}" должен начинаться с "redis://", '
