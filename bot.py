@@ -192,7 +192,7 @@ async def main() -> None:
     # picklable, поэтому сами объекты передаются не как аргументы задания,
     # а регистрируются один раз здесь и читаются в момент выполнения (см.
     # services/timeouts.py, services/health_monitor.py).
-    register_timeout_dependencies(bot, sheets_client, settings)
+    register_timeout_dependencies(bot, sheets_client, settings, redis_client)
     register_health_check_dependencies(
         bot, redis_client, sheets_client, geocoding_adapter, settings
     )

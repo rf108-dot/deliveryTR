@@ -8,6 +8,7 @@ from aiogram.exceptions import TelegramBadRequest
 from config import Settings
 from services.dispatch import (
     TAKE_ORDER_CALLBACK_PREFIX,
+    clear_expired_offer_for_all_couriers,
     get_offer_message_ids,
     notify_other_couriers_order_taken,
     record_offer_message,
@@ -18,6 +19,7 @@ from services.dispatch import (
 from services.sheets import Courier
 from texts.ru import (
     ADMIN_NO_COURIERS_ON_SHIFT_TEMPLATE,
+    COURIER_OFFER_EXPIRED_MESSAGE,
     COURIER_ORDER_ALREADY_TAKEN_MESSAGE,
 )
 
@@ -146,6 +148,37 @@ async def test_notify_other_couriers_tolerates_telegram_errors():
 
     # не должно бросить исключение — курьер мог заблокировать бота
     await notify_other_couriers_order_taken(bot, redis, "042", winning_telegram_id="999")
+
+
+@pytest.mark.asyncio
+async def test_clear_expired_offer_edits_every_courier_no_winner_excluded():
+    """Живой баг из тестирования: при offer_timeout нет «победителя» —
+    в отличие от notify_other_couriers_order_taken, ЗДЕСЬ убираем
+    кнопку у ВСЕХ, кому был отправлен оффер, без исключений."""
+    redis = _make_redis()
+    redis.hgetall = AsyncMock(return_value={b"111": b"5001", b"222": b"5002", b"333": b"5003"})
+    bot = _make_bot()
+
+    await clear_expired_offer_for_all_couriers(bot, redis, "042")
+
+    assert bot.edit_message_text.await_count == 3
+    edited_chat_ids = {c.kwargs["chat_id"] for c in bot.edit_message_text.call_args_list}
+    assert edited_chat_ids == {111, 222, 333}
+    for call in bot.edit_message_text.call_args_list:
+        assert call.kwargs["text"] == COURIER_OFFER_EXPIRED_MESSAGE
+
+
+@pytest.mark.asyncio
+async def test_clear_expired_offer_tolerates_telegram_errors():
+    redis = _make_redis()
+    redis.hgetall = AsyncMock(return_value={b"111": b"5001"})
+    bot = _make_bot()
+    bot.edit_message_text = AsyncMock(
+        side_effect=TelegramBadRequest(method=MagicMock(), message="blocked")
+    )
+
+    # не должно бросить исключение — курьер мог заблокировать бота
+    await clear_expired_offer_for_all_couriers(bot, redis, "042")
 
 
 # ------------------------------------------------------------------ #

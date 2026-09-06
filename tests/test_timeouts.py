@@ -38,7 +38,14 @@ def _make_sheets(order: dict | None = None) -> MagicMock:
 def _make_bot() -> MagicMock:
     bot = MagicMock()
     bot.send_message = AsyncMock()
+    bot.edit_message_text = AsyncMock()
     return bot
+
+
+def _make_redis(offer_message_ids: dict[bytes, bytes] | None = None) -> MagicMock:
+    redis = MagicMock()
+    redis.hgetall = AsyncMock(return_value=offer_message_ids or {})
+    return redis
 
 
 @pytest.fixture(autouse=True)
@@ -166,7 +173,8 @@ async def test_check_offer_timeout_escalates_when_still_offered(valid_settings_k
     bot = _make_bot()
     sheets = _make_sheets(order={"order_id": "042", "status": "offered"})
     settings = _make_settings(valid_settings_kwargs)
-    timeouts.register_dependencies(bot, sheets, settings)
+    redis = _make_redis()
+    timeouts.register_dependencies(bot, sheets, settings, redis)
 
     await timeouts._check_offer_timeout("042")
 
@@ -181,6 +189,26 @@ async def test_check_offer_timeout_escalates_when_still_offered(valid_settings_k
 
 
 @pytest.mark.asyncio
+async def test_check_offer_timeout_clears_button_for_all_couriers(valid_settings_kwargs):
+    """Живой баг из тестирования: кнопка «Взять» раньше оставалась
+    визуально активной у всех курьеров и после offer_timeout — теперь
+    _check_offer_timeout должен убрать её у КАЖДОГО курьера, которому
+    был отправлен оффер (в отличие от notify_other_couriers_order_taken,
+    здесь нет "победителя", которого нужно исключить)."""
+    bot = _make_bot()
+    sheets = _make_sheets(order={"order_id": "042", "status": "offered"})
+    settings = _make_settings(valid_settings_kwargs)
+    redis = _make_redis(offer_message_ids={b"500": b"111", b"501": b"222"})
+    timeouts.register_dependencies(bot, sheets, settings, redis)
+
+    await timeouts._check_offer_timeout("042")
+
+    assert bot.edit_message_text.await_count == 2
+    called_chat_ids = {call.kwargs["chat_id"] for call in bot.edit_message_text.await_args_list}
+    assert called_chat_ids == {500, 501}
+
+
+@pytest.mark.asyncio
 async def test_check_offer_timeout_noop_when_already_taken(valid_settings_kwargs):
     """Заказ вовремя перешёл в assigned — таймер должен был отмениться,
     но даже если сработал впритык (гонка на границе), проверка статуса
@@ -188,7 +216,8 @@ async def test_check_offer_timeout_noop_when_already_taken(valid_settings_kwargs
     bot = _make_bot()
     sheets = _make_sheets(order={"order_id": "042", "status": "assigned"})
     settings = _make_settings(valid_settings_kwargs)
-    timeouts.register_dependencies(bot, sheets, settings)
+    redis = _make_redis()
+    timeouts.register_dependencies(bot, sheets, settings, redis)
 
     await timeouts._check_offer_timeout("042")
 
@@ -201,7 +230,8 @@ async def test_check_offer_timeout_noop_when_order_not_found(valid_settings_kwar
     bot = _make_bot()
     sheets = _make_sheets(order=None)
     settings = _make_settings(valid_settings_kwargs)
-    timeouts.register_dependencies(bot, sheets, settings)
+    redis = _make_redis()
+    timeouts.register_dependencies(bot, sheets, settings, redis)
 
     await timeouts._check_offer_timeout("042")
 
@@ -220,7 +250,8 @@ async def test_check_pickup_timeout_escalates_when_still_assigned(valid_settings
         order={"order_id": "042", "status": "assigned", "courier_name": "Ahmet Y."}
     )
     settings = _make_settings(valid_settings_kwargs)
-    timeouts.register_dependencies(bot, sheets, settings)
+    redis = _make_redis()
+    timeouts.register_dependencies(bot, sheets, settings, redis)
 
     await timeouts._check_pickup_timeout("042")
 
@@ -236,7 +267,8 @@ async def test_check_pickup_timeout_noop_when_already_picked_up(valid_settings_k
     bot = _make_bot()
     sheets = _make_sheets(order={"order_id": "042", "status": "picked_up"})
     settings = _make_settings(valid_settings_kwargs)
-    timeouts.register_dependencies(bot, sheets, settings)
+    redis = _make_redis()
+    timeouts.register_dependencies(bot, sheets, settings, redis)
 
     await timeouts._check_pickup_timeout("042")
 
@@ -253,7 +285,8 @@ async def test_check_delivery_timeout_escalates_when_still_picked_up(valid_setti
     bot = _make_bot()
     sheets = _make_sheets(order={"order_id": "042", "status": "picked_up"})
     settings = _make_settings(valid_settings_kwargs)
-    timeouts.register_dependencies(bot, sheets, settings)
+    redis = _make_redis()
+    timeouts.register_dependencies(bot, sheets, settings, redis)
 
     await timeouts._check_delivery_timeout("042")
 
@@ -269,7 +302,8 @@ async def test_check_delivery_timeout_noop_when_already_delivered(valid_settings
     bot = _make_bot()
     sheets = _make_sheets(order={"order_id": "042", "status": "delivered"})
     settings = _make_settings(valid_settings_kwargs)
-    timeouts.register_dependencies(bot, sheets, settings)
+    redis = _make_redis()
+    timeouts.register_dependencies(bot, sheets, settings, redis)
 
     await timeouts._check_delivery_timeout("042")
 

@@ -472,6 +472,11 @@ COURIER_OFFER_TEMPLATE = (
 )
 COURIER_TAKE_ORDER_BUTTON = "✅ Взять"
 COURIER_ORDER_ALREADY_TAKEN_MESSAGE = "Этот заказ уже принят другим курьером."
+# Живой баг из тестирования: раньше кнопка «Взять» оставалась визуально
+# активной у ВСЕХ курьеров и после offer_timeout (никто не принял) —
+# функционально не опасно (повторное нажатие корректно отклонялось),
+# но вводило в заблуждение. См. clear_expired_offer_for_all_couriers.
+COURIER_OFFER_EXPIRED_MESSAGE = "⏱ Время на принятие заказа истекло — предложение больше не активно."
 COURIER_ORDER_TAKEN_BY_YOU_TEMPLATE = "✅ Вы взяли заказ #{order_id}!"
 
 ADMIN_NO_COURIERS_ON_SHIFT_TEMPLATE = (

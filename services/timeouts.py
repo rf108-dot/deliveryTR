@@ -46,6 +46,7 @@ from datetime import datetime, timedelta, timezone
 
 from apscheduler.jobstores.base import JobLookupError
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from redis.asyncio import Redis
 
 from config import Settings
 from services.notifications import notify_admins
@@ -64,14 +65,20 @@ logger = logging.getLogger(__name__)
 _registry: dict[str, object] = {}
 
 
-def register_dependencies(bot, sheets: SheetsClient, settings: Settings) -> None:
+def register_dependencies(bot, sheets: SheetsClient, settings: Settings, redis: Redis) -> None:
     """Вызывается один раз при старте бота (bot.py) — до scheduler.start(),
     чтобы задания, восстановленные из Redis сразу при старте (если их
     run_date уже прошёл, misfire_grace_time позволит им выполниться),
-    имели доступ к живым bot/sheets/settings."""
+    имели доступ к живым bot/sheets/settings/redis.
+
+    redis добавлен вместе с _check_offer_timeout — для очистки кнопки
+    «Взять» у всех курьеров, когда никто не успел (живой баг из
+    тестирования, см. clear_expired_offer_for_all_couriers в
+    services/dispatch.py)."""
     _registry["bot"] = bot
     _registry["sheets"] = sheets
     _registry["settings"] = settings
+    _registry["redis"] = redis
 
 
 def _get_bot():
@@ -84,6 +91,10 @@ def _get_sheets() -> SheetsClient:
 
 def _get_settings() -> Settings:
     return _registry["settings"]  # type: ignore[return-value]
+
+
+def _get_redis() -> Redis:
+    return _registry["redis"]  # type: ignore[return-value]
 
 
 def _job_id(kind: str, order_id: str) -> str:
@@ -146,6 +157,13 @@ async def _check_offer_timeout(order_id: str) -> None:
     await notify_admins(
         _get_bot(), _get_settings(), ADMIN_NO_ONE_ACCEPTED_TEMPLATE.format(order_id=order_id)
     )
+
+    # Локальный импорт — избегаем циклической зависимости: dispatch.py
+    # уже импортирует schedule_offer_timeout ИЗ этого модуля (timeouts.py),
+    # поэтому импорт dispatch.py на уровне модуля здесь создал бы цикл.
+    from services.dispatch import clear_expired_offer_for_all_couriers
+
+    await clear_expired_offer_for_all_couriers(_get_bot(), _get_redis(), order_id)
 
 
 # ------------------------------------------------------------------ #

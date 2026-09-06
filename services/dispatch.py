@@ -39,6 +39,7 @@ from services.timeouts import schedule_offer_timeout
 from texts.ru import (
     ADMIN_NO_COURIERS_ON_SHIFT_TEMPLATE,
     COURIER_OFFER_CUSTOM_TEMPLATE,
+    COURIER_OFFER_EXPIRED_MESSAGE,
     COURIER_OFFER_P2P_TEMPLATE,
     COURIER_OFFER_TEMPLATE,
     COURIER_ORDER_ALREADY_TAKEN_MESSAGE,
@@ -152,6 +153,35 @@ async def notify_other_couriers_order_taken(
             # это просто чистка UI, не влияет на корректность заказа.
             logger.debug(
                 "Не удалось обновить сообщение курьеру %s (заказ %s)", telegram_id, order_id
+            )
+
+
+async def clear_expired_offer_for_all_couriers(bot: Bot, redis: Redis, order_id: str) -> None:
+    """
+    Зеркало notify_other_couriers_order_taken для случая, когда НИКТО
+    не принял заказ (offer_timeout истёк, статус → no_courier, ТЗ §9) —
+    живой баг из тестирования: раньше кнопка «Взять» оставалась
+    визуально активной у всех курьеров и после истечения оффера
+    (функционально безопасно — повторное нажатие корректно отклонялось
+    как «кнопка устарела», см. handlers/courier.py::on_take_order, но
+    вводило в заблуждение). Здесь, в отличие от
+    notify_other_couriers_order_taken, победителя нет — убираем кнопку
+    у ВСЕХ курьеров без исключения. Вызывается из
+    services/timeouts.py::_check_offer_timeout.
+    """
+    message_ids = await get_offer_message_ids(redis, order_id)
+    for telegram_id, message_id in message_ids.items():
+        try:
+            await bot.edit_message_text(
+                chat_id=int(telegram_id),
+                message_id=message_id,
+                text=COURIER_OFFER_EXPIRED_MESSAGE,
+            )
+        except TelegramBadRequest:
+            logger.debug(
+                "Не удалось обновить сообщение курьеру %s (заказ %s, offer_timeout)",
+                telegram_id,
+                order_id,
             )
 
 
