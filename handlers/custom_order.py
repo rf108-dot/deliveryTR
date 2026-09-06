@@ -55,6 +55,7 @@ from texts.ru import (
     ADMIN_CUSTOM_ORDER_REJECTED_ACK,
     ADMIN_CUSTOM_ORDER_REVIEW_TEMPLATE,
     ADMIN_CUSTOM_ORDER_TIMEOUT_TEMPLATE,
+    ADMIN_REJECT_CUSTOM_REASON_PROMPT,
     CUSTOM_ORDER_CANCEL_BUTTON,
     CUSTOM_ORDER_CANCELLED_ACK,
     CUSTOM_ORDER_CONFIRMED_MESSAGE,
@@ -375,27 +376,17 @@ async def cmd_confirm_custom(
     await message.answer(ADMIN_CUSTOM_ORDER_CONFIRMED_ACK)
 
 
-@router.message(F.text.startswith("/reject_custom_"))
-async def cmd_reject_custom(
+async def _reject_custom_order(
     message: Message,
-    settings: Settings,
     redis: Redis,
     bot: Bot,
     scheduler: AsyncIOScheduler,
+    target_user_id: int,
+    reason: str,
 ) -> None:
-    if not message.from_user or message.from_user.id not in settings.admin_ids:
-        return
-
-    parsed = _parse_target_user_id("/reject_custom_", message.text or "")
-    if parsed is None:
-        return
-    target_user_id, reason = parsed
-
-    pending_raw = await redis.get(_pending_key(target_user_id))
-    if pending_raw is None:
-        await message.answer(ADMIN_CONFIRM_CUSTOM_NOT_FOUND_MESSAGE)
-        return
-
+    """Общая логика отклонения заявки — используется и из cmd_reject_custom
+    (причина сразу в команде), и из on_reject_reason_received (причина
+    отдельным сообщением после голой команды)."""
     try:
         scheduler.remove_job(_job_id(target_user_id))
     except JobLookupError:
@@ -414,10 +405,78 @@ async def cmd_reject_custom(
             "Не удалось уведомить клиента %s об отклонении заявки: %s", target_user_id, exc
         )
 
-    logger.info(
-        "custom_order_rejected: user_id=%s admin_id=%s reason=%r",
-        target_user_id,
-        message.from_user.id,
-        reason,
-    )
+    logger.info("custom_order_rejected: user_id=%s reason=%r", target_user_id, reason)
     await message.answer(ADMIN_CUSTOM_ORDER_REJECTED_ACK)
+
+
+@router.message(F.text.startswith("/reject_custom_"))
+async def cmd_reject_custom(
+    message: Message,
+    settings: Settings,
+    redis: Redis,
+    bot: Bot,
+    scheduler: AsyncIOScheduler,
+    state: FSMContext,
+) -> None:
+    if not message.from_user or message.from_user.id not in settings.admin_ids:
+        return
+
+    parsed = _parse_target_user_id("/reject_custom_", message.text or "")
+    if parsed is None:
+        return
+    target_user_id, reason = parsed
+
+    pending_raw = await redis.get(_pending_key(target_user_id))
+    if pending_raw is None:
+        await message.answer(ADMIN_CONFIRM_CUSTOM_NOT_FOUND_MESSAGE)
+        return
+
+    if not reason:
+        # Живой фидбэк из тестирования: раньше отказ без причины сразу
+        # уходил клиенту шаблонным текстом — ощущалось грубым. Теперь
+        # запрашиваем причину и ждём её следующим сообщением (тот же
+        # паттерн, что у /reply_ в handlers/support.py).
+        await state.update_data(custom_order_reject_target_user_id=target_user_id)
+        await state.set_state(CustomOrderStates.waiting_for_reject_reason)
+        await message.answer(ADMIN_REJECT_CUSTOM_REASON_PROMPT)
+        return
+
+    await state.set_state(None)
+    await _reject_custom_order(message, redis, bot, scheduler, target_user_id, reason)
+
+
+@router.message(StateFilter(CustomOrderStates.waiting_for_reject_reason), F.text)
+async def on_reject_reason_received(
+    message: Message,
+    settings: Settings,
+    redis: Redis,
+    bot: Bot,
+    scheduler: AsyncIOScheduler,
+    state: FSMContext,
+) -> None:
+    """Продолжение cmd_reject_custom — см. docstring
+    CustomOrderStates.waiting_for_reject_reason.
+
+    Регистрация ПОСЛЕ cmd_confirm_custom/cmd_reject_custom в этом же
+    роутере важна (как и в handlers/support.py): если Админ, ожидая
+    причину для одного клиента, вместо этого пришлёт НОВУЮ команду
+    "/confirm_custom_[id2]" или "/reject_custom_[id2] ..." — она должна
+    попасть в соответствующий cmd_*, а не быть проглочена этим
+    хендлером как текст причины для старого target_user_id."""
+    if not message.from_user or message.from_user.id not in settings.admin_ids:
+        return
+
+    data = await state.get_data()
+    target_user_id = data.get("custom_order_reject_target_user_id")
+    if target_user_id is None:
+        await state.set_state(None)
+        return
+
+    reason = message.text.strip()
+    if not reason:
+        await message.answer(ADMIN_REJECT_CUSTOM_REASON_PROMPT)
+        return
+
+    await state.set_state(None)
+    await state.update_data(custom_order_reject_target_user_id=None)
+    await _reject_custom_order(message, redis, bot, scheduler, target_user_id, reason)

@@ -19,6 +19,7 @@ from handlers.custom_order import (
     on_custom_order_cancel,
     on_custom_order_description_received,
     on_custom_order_entry,
+    on_reject_reason_received,
     register_dependencies,
 )
 from services.sheets import Merchant
@@ -27,6 +28,7 @@ from texts.ru import (
     ADMIN_CONFIRM_CUSTOM_NOT_FOUND_MESSAGE,
     ADMIN_CUSTOM_ORDER_CONFIRMED_ACK,
     ADMIN_CUSTOM_ORDER_REJECTED_ACK,
+    ADMIN_REJECT_CUSTOM_REASON_PROMPT,
     CUSTOM_ORDER_CANCELLED_ACK,
     CUSTOM_ORDER_CONFIRMED_MESSAGE,
     CUSTOM_ORDER_EMPTY_TEXT_MESSAGE,
@@ -341,11 +343,12 @@ async def test_reject_custom_happy_path_notifies_client_with_reason(valid_settin
     redis = _make_redis()
     bot = _make_bot()
     scheduler = _make_scheduler()
+    state = _make_state()
 
     pending = {"merchant_id": "rest_001", "merchant_name": "MonAmi", "description": "x", "photo_file_id": "", "username": ""}
     await redis.set(_pending_key(CLIENT_ID), json.dumps(pending))
 
-    await cmd_reject_custom(message, settings, redis, bot, scheduler)
+    await cmd_reject_custom(message, settings, redis, bot, scheduler, state)
 
     assert await redis.get(_pending_key(CLIENT_ID)) is None
     scheduler.remove_job.assert_called_once_with(_job_id(CLIENT_ID))
@@ -353,6 +356,75 @@ async def test_reject_custom_happy_path_notifies_client_with_reason(valid_settin
     sent_text = bot.send_message.await_args.args[1]
     assert "не работаем с этим районом" in sent_text
     message.answer.assert_awaited_once_with(ADMIN_CUSTOM_ORDER_REJECTED_ACK)
+
+
+@pytest.mark.asyncio
+async def test_reject_custom_without_reason_prompts_and_remembers(valid_settings_kwargs):
+    """Живой фидбэк из тестирования: голая /reject_custom_[id] без
+    причины больше не отклоняет молча шаблонным текстом — запрашивает
+    причину у Админа и запоминает получателя."""
+    message = _make_message(text=f"/reject_custom_{CLIENT_ID}")
+    message.from_user = MagicMock(id=ADMIN_ID)
+    settings = _make_settings(valid_settings_kwargs)
+    redis = _make_redis()
+    bot = _make_bot()
+    scheduler = _make_scheduler()
+    state = _make_state()
+
+    pending = {"merchant_id": "rest_001", "merchant_name": "MonAmi", "description": "x", "photo_file_id": "", "username": ""}
+    await redis.set(_pending_key(CLIENT_ID), json.dumps(pending))
+
+    await cmd_reject_custom(message, settings, redis, bot, scheduler, state)
+
+    bot.send_message.assert_not_called()  # клиенту рано отправлять — причина не введена
+    message.answer.assert_awaited_once_with(ADMIN_REJECT_CUSTOM_REASON_PROMPT)
+    state.set_state.assert_awaited_once_with(CustomOrderStates.waiting_for_reject_reason)
+    data = await state.get_data()
+    assert data["custom_order_reject_target_user_id"] == CLIENT_ID
+    # заявка НЕ снята из Redis и таймер НЕ отменён — отказ ещё не завершён
+    assert await redis.get(_pending_key(CLIENT_ID)) is not None
+    scheduler.remove_job.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_followup_reject_reason_completes_rejection(valid_settings_kwargs):
+    state = _make_state({"custom_order_reject_target_user_id": CLIENT_ID})
+    message = _make_message(text="К сожалению, такой товар не доставляем")
+    message.from_user = MagicMock(id=ADMIN_ID)
+    settings = _make_settings(valid_settings_kwargs)
+    redis = _make_redis()
+    bot = _make_bot()
+    scheduler = _make_scheduler()
+
+    pending = {"merchant_id": "rest_001", "merchant_name": "MonAmi", "description": "x", "photo_file_id": "", "username": ""}
+    await redis.set(_pending_key(CLIENT_ID), json.dumps(pending))
+
+    await on_reject_reason_received(message, settings, redis, bot, scheduler, state)
+
+    assert await redis.get(_pending_key(CLIENT_ID)) is None
+    scheduler.remove_job.assert_called_once_with(_job_id(CLIENT_ID))
+    bot.send_message.assert_awaited_once()
+    sent_text = bot.send_message.await_args.args[1]
+    assert "К сожалению, такой товар не доставляем" in sent_text
+    message.answer.assert_awaited_once_with(ADMIN_CUSTOM_ORDER_REJECTED_ACK)
+    state.set_state.assert_awaited_once_with(None)
+    data = await state.get_data()
+    assert data["custom_order_reject_target_user_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_followup_reject_reason_from_non_admin_is_ignored(valid_settings_kwargs):
+    state = _make_state({"custom_order_reject_target_user_id": CLIENT_ID})
+    message = _make_message(text="я не админ")
+    message.from_user = MagicMock(id=NON_ADMIN_ID)
+    settings = _make_settings(valid_settings_kwargs)
+    redis = _make_redis()
+    bot = _make_bot()
+    scheduler = _make_scheduler()
+
+    await on_reject_reason_received(message, settings, redis, bot, scheduler, state)
+
+    bot.send_message.assert_not_called()
 
 
 # ------------------------------------------------------------------ #

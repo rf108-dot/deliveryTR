@@ -226,6 +226,13 @@ ADMIN_CONFIRM_CUSTOM_NOT_FOUND_MESSAGE = (
 )
 ADMIN_CUSTOM_ORDER_CONFIRMED_ACK = "✅ Запрос подтверждён, клиент оформляет заказ."
 ADMIN_CUSTOM_ORDER_REJECTED_ACK = "Запрос отклонён."
+# Живой фидбэк из тестирования: раньше отказ без причины сразу уходил
+# клиенту шаблонным текстом без объяснения — это ощущалось грубым.
+# Теперь голая "/reject_custom_[id]" без причины ЗАПРАШИВАЕТ у Админа
+# текст объяснения (тот же паттерн "запомнить и подождать следующее
+# сообщение", что и у /reply_ в handlers/support.py), а не проезжает
+# молча с пустой причиной.
+ADMIN_REJECT_CUSTOM_REASON_PROMPT = "Опишите причину отказа для клиента:"
 
 # Итоговое подтверждение чекаута (7.4.3) для order_kind=custom — переиспользует
 # ORDER_SUMMARY_HEADER/MERCHANT_LINE/ADDRESS_LINE/CONTACT_*_LINE/PAYMENT_NOTE

@@ -32,9 +32,17 @@ class CustomOrderStates(StatesGroup):
     описания. После отправки на модерацию явное FSM-состояние больше не
     нужно — пока клиент ждёт решения Админа, он может свободно
     пользоваться ботом дальше (см. handlers/custom_order.py: заявка на
-    модерации хранится в Redis по user_id, не в FSM)."""
+    модерации хранится в Redis по user_id, не в FSM).
+
+    waiting_for_reject_reason — состояние АДМИНА (не клиента): живой
+    фидбэк из тестирования — голая "/reject_custom_[id]" без причины
+    раньше сразу уходила клиенту шаблонным текстом без объяснения,
+    теперь запрашивает у Админа причину и ждёт её следующим обычным
+    сообщением (тот же паттерн, что и waiting_for_reply_text в
+    SupportStates)."""
 
     waiting_for_description = State()
+    waiting_for_reject_reason = State()
 
 
 class P2PStates(StatesGroup):
