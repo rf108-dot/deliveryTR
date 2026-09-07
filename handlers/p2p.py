@@ -58,6 +58,7 @@ from texts.ru import (
     ADMIN_P2P_APPROVED_ACK,
     ADMIN_P2P_NOT_FOUND_MESSAGE,
     ADMIN_P2P_REJECTED_ACK,
+    ADMIN_REJECT_P2P_REASON_PROMPT,
     ADMIN_P2P_REVIEW_TEMPLATE,
     ORDER_ADDRESS_NOT_FOUND,
     ORDER_ADDRESS_PARTIAL_MATCH_WARNING,
@@ -772,9 +773,52 @@ async def cmd_approve_p2p(
     await message.answer(ADMIN_P2P_APPROVED_ACK)
 
 
+async def _reject_p2p_order(
+    message: Message,
+    sheets: SheetsClient,
+    scheduler: AsyncIOScheduler,
+    bot: Bot,
+    order_id: str,
+    reason: str,
+) -> None:
+    """Общая логика отклонения P2P-заказа — используется и из
+    cmd_reject_p2p (причина сразу в команде), и из
+    on_p2p_reject_reason_received (причина отдельным сообщением после
+    голой команды). Зеркало _reject_custom_order в
+    handlers/custom_order.py."""
+    cancel_p2p_review_reminder(scheduler, order_id)
+    await sheets.update_order_fields(order_id, {"status": "rejected", "cancel_reason": reason})
+
+    order = await sheets.get_order(order_id)
+    client_user_id = order.get("user_id") if order else None
+    reason_suffix = P2P_REJECTED_REASON_SUFFIX_TEMPLATE.format(reason=reason) if reason else ""
+    if client_user_id:
+        try:
+            await bot.send_message(
+                int(client_user_id), P2P_REJECTED_CLIENT_TEMPLATE.format(reason_suffix=reason_suffix)
+            )
+        except TelegramBadRequest as exc:
+            logger.warning("Не удалось уведомить клиента об отклонении P2P-заказа %s: %s", order_id, exc)
+
+    logger.info("p2p_admin_rejected: order_id=%s reason=%r", order_id, reason)
+    await sheets.append_event(
+        event_type="p2p_admin_rejected",
+        actor_role="admin",
+        actor_id=str(message.from_user.id) if message.from_user else "",
+        order_id=order_id,
+        details=reason,
+    )
+    await message.answer(ADMIN_P2P_REJECTED_ACK)
+
+
 @router.message(F.text.startswith("/reject_p2p_"))
 async def cmd_reject_p2p(
-    message: Message, settings: Settings, sheets: SheetsClient, scheduler: AsyncIOScheduler, bot: Bot
+    message: Message,
+    settings: Settings,
+    sheets: SheetsClient,
+    scheduler: AsyncIOScheduler,
+    bot: Bot,
+    state: FSMContext,
 ) -> None:
     if not message.from_user or message.from_user.id not in settings.admin_ids:
         return
@@ -789,28 +833,49 @@ async def cmd_reject_p2p(
         await message.answer(ADMIN_P2P_NOT_FOUND_MESSAGE)
         return
 
-    cancel_p2p_review_reminder(scheduler, order_id)
-    await sheets.update_order_fields(order_id, {"status": "rejected", "cancel_reason": reason})
+    if not reason:
+        # Живой фидбэк из тестирования: та же находка, что и у
+        # /reject_custom_ в handlers/custom_order.py — голая команда
+        # без причины запрашивает текст и ждёт его следующим сообщением,
+        # вместо того чтобы сразу уходить клиенту шаблоном без объяснения.
+        await state.update_data(p2p_reject_target_order_id=order_id)
+        await state.set_state(P2PStates.waiting_for_reject_reason)
+        await message.answer(ADMIN_REJECT_P2P_REASON_PROMPT)
+        return
 
-    client_user_id = order.get("user_id")
-    reason_suffix = P2P_REJECTED_REASON_SUFFIX_TEMPLATE.format(reason=reason) if reason else ""
-    if client_user_id:
-        try:
-            await bot.send_message(
-                int(client_user_id), P2P_REJECTED_CLIENT_TEMPLATE.format(reason_suffix=reason_suffix)
-            )
-        except TelegramBadRequest as exc:
-            logger.warning("Не удалось уведомить клиента об отклонении P2P-заказа %s: %s", order_id, exc)
+    await state.set_state(None)
+    await _reject_p2p_order(message, sheets, scheduler, bot, order_id, reason)
 
-    logger.info(
-        "p2p_admin_rejected: order_id=%s admin_id=%s reason=%r", order_id, message.from_user.id, reason
-    )
-    await sheets.append_event(
-        event_type="p2p_admin_rejected",
-        actor_role="admin",
-        actor_id=str(message.from_user.id),
-        order_id=order_id,
-        details=reason,
-    )
 
-    await message.answer(ADMIN_P2P_REJECTED_ACK)
+@router.message(StateFilter(P2PStates.waiting_for_reject_reason), F.text)
+async def on_p2p_reject_reason_received(
+    message: Message,
+    settings: Settings,
+    sheets: SheetsClient,
+    scheduler: AsyncIOScheduler,
+    bot: Bot,
+    state: FSMContext,
+) -> None:
+    """Продолжение cmd_reject_p2p — см. docstring
+    P2PStates.waiting_for_reject_reason. Регистрация ПОСЛЕ cmd_approve_p2p/
+    cmd_reject_p2p обязательна (та же причина, что в handlers/support.py
+    и handlers/custom_order.py): новая команда /approve_p2p_/reject_p2p_
+    во время ожидания причины должна попасть в соответствующий cmd_*,
+    а не быть проглочена этим хендлером."""
+    if not message.from_user or message.from_user.id not in settings.admin_ids:
+        return
+
+    data = await state.get_data()
+    order_id = data.get("p2p_reject_target_order_id")
+    if order_id is None:
+        await state.set_state(None)
+        return
+
+    reason = message.text.strip()
+    if not reason:
+        await message.answer(ADMIN_REJECT_P2P_REASON_PROMPT)
+        return
+
+    await state.set_state(None)
+    await state.update_data(p2p_reject_target_order_id=None)
+    await _reject_p2p_order(message, sheets, scheduler, bot, order_id, reason)

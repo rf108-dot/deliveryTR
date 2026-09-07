@@ -65,6 +65,12 @@ class P2PStates(StatesGroup):
     waiting_for_contact = State()
     confirming_order = State()
 
+    # Состояние АДМИНА (не клиента) — живой фидбэк из тестирования: та
+    # же находка, что и у CustomOrderStates.waiting_for_reject_reason /
+    # SupportStates.waiting_for_reply_text — голая "/reject_p2p_[id]"
+    # без причины раньше сразу уходила клиенту шаблонным текстом.
+    waiting_for_reject_reason = State()
+
 
 class SupportStates(StatesGroup):
     """Вопрос в поддержку (ТЗ §7.5, §11): один шаг — ожидание текста

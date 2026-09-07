@@ -20,6 +20,7 @@ from handlers.p2p import (
     on_p2p_late_photo_attached,
     on_p2p_pickup_location_received,
     on_p2p_pickup_text_as_address,
+    on_p2p_reject_reason_received,
     on_p2p_submit,
 )
 from services.geocoding import GeocodeResult
@@ -29,6 +30,7 @@ from texts.ru import (
     ADMIN_P2P_APPROVED_ACK,
     ADMIN_P2P_NOT_FOUND_MESSAGE,
     ADMIN_P2P_REJECTED_ACK,
+    ADMIN_REJECT_P2P_REASON_PROMPT,
     P2P_APPROVED_CLIENT_MESSAGE,
     P2P_CANCELLED_ACK,
     P2P_DESCRIPTION_PROMPT,
@@ -565,8 +567,9 @@ async def test_reject_happy_path_updates_status_and_notifies_client(valid_settin
     sheets = _make_sheets(order=order)
     scheduler = _make_scheduler()
     bot = _make_bot()
+    state = _make_state()
 
-    await cmd_reject_p2p(message, settings, sheets, scheduler, bot)
+    await cmd_reject_p2p(message, settings, sheets, scheduler, bot, state)
 
     sheets.update_order_fields.assert_awaited_once_with(
         "043", {"status": "rejected", "cancel_reason": "крупногабаритный груз"}
@@ -576,3 +579,67 @@ async def test_reject_happy_path_updates_status_and_notifies_client(valid_settin
     sent_text = bot.send_message.await_args.args[1]
     assert "крупногабаритный груз" in sent_text
     message.answer.assert_awaited_once_with(ADMIN_P2P_REJECTED_ACK)
+
+
+@pytest.mark.asyncio
+async def test_reject_p2p_without_reason_prompts_and_remembers(valid_settings_kwargs):
+    """Живой фидбэк из тестирования: голая /reject_p2p_[id] без причины
+    больше не отклоняет молча шаблонным текстом — запрашивает причину
+    у Админа и запоминает order_id (зеркало custom_order.py)."""
+    message = _make_message(text="/reject_p2p_043")
+    message.from_user = MagicMock(id=ADMIN_ID)
+    settings = _make_settings(valid_settings_kwargs)
+    order = {"order_id": "043", "status": "pending_review", "user_id": str(CLIENT_ID)}
+    sheets = _make_sheets(order=order)
+    scheduler = _make_scheduler()
+    bot = _make_bot()
+    state = _make_state()
+
+    await cmd_reject_p2p(message, settings, sheets, scheduler, bot, state)
+
+    bot.send_message.assert_not_called()
+    sheets.update_order_fields.assert_not_called()
+    message.answer.assert_awaited_once_with(ADMIN_REJECT_P2P_REASON_PROMPT)
+    state.set_state.assert_awaited_once_with(P2PStates.waiting_for_reject_reason)
+    data = await state.get_data()
+    assert data["p2p_reject_target_order_id"] == "043"
+
+
+@pytest.mark.asyncio
+async def test_followup_p2p_reject_reason_completes_rejection(valid_settings_kwargs):
+    state = _make_state({"p2p_reject_target_order_id": "043"})
+    message = _make_message(text="слишком большой груз для наших курьеров")
+    message.from_user = MagicMock(id=ADMIN_ID)
+    settings = _make_settings(valid_settings_kwargs)
+    order = {"order_id": "043", "status": "rejected", "user_id": str(CLIENT_ID)}
+    sheets = _make_sheets(order=order)
+    scheduler = _make_scheduler()
+    bot = _make_bot()
+
+    await on_p2p_reject_reason_received(message, settings, sheets, scheduler, bot, state)
+
+    sheets.update_order_fields.assert_awaited_once_with(
+        "043", {"status": "rejected", "cancel_reason": "слишком большой груз для наших курьеров"}
+    )
+    bot.send_message.assert_awaited_once()
+    sent_text = bot.send_message.await_args.args[1]
+    assert "слишком большой груз для наших курьеров" in sent_text
+    message.answer.assert_awaited_once_with(ADMIN_P2P_REJECTED_ACK)
+    state.set_state.assert_awaited_once_with(None)
+    data = await state.get_data()
+    assert data["p2p_reject_target_order_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_followup_p2p_reject_reason_from_non_admin_is_ignored(valid_settings_kwargs):
+    state = _make_state({"p2p_reject_target_order_id": "043"})
+    message = _make_message(text="я не админ")
+    message.from_user = MagicMock(id=NON_ADMIN_ID)
+    settings = _make_settings(valid_settings_kwargs)
+    sheets = _make_sheets()
+    scheduler = _make_scheduler()
+    bot = _make_bot()
+
+    await on_p2p_reject_reason_received(message, settings, sheets, scheduler, bot, state)
+
+    bot.send_message.assert_not_called()

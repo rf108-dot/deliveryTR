@@ -329,6 +329,10 @@ ADMIN_P2P_NOT_FOUND_MESSAGE = (
 )
 ADMIN_P2P_APPROVED_ACK = "✅ Заказ одобрен, ищем курьера."
 ADMIN_P2P_REJECTED_ACK = "Заказ отклонён."
+# Тот же живой фидбэк, что и ADMIN_REJECT_CUSTOM_REASON_PROMPT в
+# custom_order.py — голая "/reject_p2p_[id]" без причины теперь
+# запрашивает текст, а не уходит клиенту шаблоном без объяснения.
+ADMIN_REJECT_P2P_REASON_PROMPT = "Опишите причину отказа для клиента:"
 
 P2P_APPROVED_CLIENT_MESSAGE = "✅ Заказ одобрен, ищем курьера."
 P2P_REJECTED_CLIENT_TEMPLATE = "К сожалению, сейчас не сможем вам помочь.{reason_suffix}"
