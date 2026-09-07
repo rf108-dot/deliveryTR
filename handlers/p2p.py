@@ -74,6 +74,7 @@ from texts.ru import (
     P2P_DROPOFF_PROMPT,
     P2P_EDIT_BUTTON,
     P2P_EMPTY_TEXT_MESSAGE,
+    P2P_LATE_PHOTO_ATTACHED_ACK,
     P2P_LOCATION_BUTTON,
     P2P_LOCATION_RECEIVED_ACK,
     P2P_MANUAL_ADDRESS_BUTTON,
@@ -246,6 +247,40 @@ async def on_p2p_description_received(message: Message, state: FSMContext) -> No
     await message.answer(P2P_PICKUP_PROMPT, reply_markup=_location_keyboard())
 
 
+@router.message(
+    StateFilter(
+        P2PStates.waiting_for_pickup_location,
+        P2PStates.waiting_for_pickup_manual_address,
+        P2PStates.waiting_for_dropoff_location,
+        P2PStates.waiting_for_dropoff_manual_address,
+        P2PStates.waiting_for_contact,
+        P2PStates.confirming_order,
+    ),
+    F.photo,
+)
+async def on_p2p_late_photo_attached(message: Message, state: FSMContext) -> None:
+    """
+    Живой баг из тестирования: on_p2p_description_received ожидает фото
+    ВМЕСТЕ с текстом описания в одном сообщении (message.photo рядом с
+    message.text/caption) — но реальный пользователь может сначала
+    отправить текст, а фото прикрепить ОТДЕЛЬНЫМ следующим сообщением.
+    К этому моменту состояние уже ушло на следующий шаг (точка А/Б/
+    контакт), и фото без этого хендлера попадало бы в "catch-all
+    неожиданного ввода" соответствующего шага — молча терялось.
+
+    Регистрация ВЫШЕ per-шаговых catch-all-хендлеров (on_p2p_pickup_
+    unexpected_input и т.п.) обязательна: aiogram пробует хендлеры
+    одного роутера в порядке объявления в файле, а F.photo для
+    Message означает отсутствие message.text (у фото — caption, не
+    text), поэтому конфликта с текстовыми фильтрами тех же шагов нет —
+    порядок регистрации важен только относительно catch-all'ов без
+    какого-либо F-фильтра.
+    """
+    photo_file_id = message.photo[-1].file_id
+    await _update_p2p_draft(state, photo_file_id=photo_file_id)
+    await message.answer(P2P_LATE_PHOTO_ATTACHED_ACK)
+
+
 # ---------------------------------------------------------------------- #
 # Шаг 2/3: точки А и Б (7.6.2/7.6.3) — почти идентичная пара хендлеров,
 # отличаются только тем, какое поле драфта пишут и куда ведут дальше.
@@ -256,6 +291,27 @@ async def on_p2p_description_received(message: Message, state: FSMContext) -> No
 # внутри одной функции (та же длина кода, меньше ясности "что на каком
 # шаге происходит" при беглом чтении файла).
 # ---------------------------------------------------------------------- #
+
+
+async def _process_pickup_address_text(
+    message: Message, state: FSMContext, geocoding: GeocodingAdapter, address_text: str
+) -> None:
+    geocode_result = await geocoding.geocode(address_text)
+    if geocode_result is None:
+        await message.answer(ORDER_ADDRESS_NOT_FOUND)
+        return
+
+    if geocode_result.partial_match:
+        await message.answer(ORDER_ADDRESS_PARTIAL_MATCH_WARNING)
+
+    await _update_p2p_draft(
+        state,
+        pickup_address=address_text,
+        pickup_lat=geocode_result.lat,
+        pickup_lon=geocode_result.lon,
+    )
+    await state.set_state(P2PStates.waiting_for_dropoff_location)
+    await message.answer(P2P_DROPOFF_PROMPT, reply_markup=_location_keyboard())
 
 
 @router.message(StateFilter(P2PStates.waiting_for_pickup_location), F.location)
@@ -285,8 +341,33 @@ async def on_p2p_pickup_manual_chosen(message: Message, state: FSMContext) -> No
     await message.answer(ORDER_MANUAL_ADDRESS_PROMPT, reply_markup=ReplyKeyboardRemove())
 
 
+@router.message(StateFilter(P2PStates.waiting_for_pickup_location), F.text)
+async def on_p2p_pickup_text_as_address(
+    message: Message, state: FSMContext, geocoding: GeocodingAdapter
+) -> None:
+    """
+    Живой фидбэк из тестирования: раньше на шаге "Откуда забрать?" бот
+    принимал текст ТОЛЬКО после явного нажатия кнопки [✏️ Ввести адрес]
+    — набранный сразу, без нажатия, адрес попадал в catch-all
+    "неожиданный ввод" и заставлял тапать кнопку зря. Кнопка
+    [✏️ Ввести адрес] по-прежнему работает (см. on_p2p_pickup_manual_
+    chosen выше — она просто ведёт в тот же результат другим путём),
+    но теперь и прямой ввод текста, минуя кнопку, тоже принимается —
+    у пользователя нет причин ждать кнопку, если он и так печатает.
+    """
+    address_text = message.text.strip()
+    if not address_text:
+        await message.answer(P2P_UNEXPECTED_INPUT_IN_LOCATION_STEP)
+        return
+    await _process_pickup_address_text(message, state, geocoding, address_text)
+
+
 @router.message(StateFilter(P2PStates.waiting_for_pickup_location))
 async def on_p2p_pickup_unexpected_input(message: Message) -> None:
+    """С учётом on_p2p_pickup_text_as_address (выше, ловит F.text
+    раньше) и on_p2p_late_photo_attached (ловит F.photo раньше) сюда
+    доходят только по-настоящему нераспознаваемые типы ввода —
+    стикеры, голосовые, документы и т.п."""
     await message.answer(P2P_UNEXPECTED_INPUT_IN_LOCATION_STEP)
 
 
@@ -294,7 +375,12 @@ async def on_p2p_pickup_unexpected_input(message: Message) -> None:
 async def on_p2p_pickup_manual_address_received(
     message: Message, state: FSMContext, geocoding: GeocodingAdapter
 ) -> None:
-    address_text = message.text.strip()
+    await _process_pickup_address_text(message, state, geocoding, message.text.strip())
+
+
+async def _process_dropoff_address_text(
+    message: Message, state: FSMContext, geocoding: GeocodingAdapter, settings: Settings, address_text: str
+) -> None:
     geocode_result = await geocoding.geocode(address_text)
     if geocode_result is None:
         await message.answer(ORDER_ADDRESS_NOT_FOUND)
@@ -305,12 +391,11 @@ async def on_p2p_pickup_manual_address_received(
 
     await _update_p2p_draft(
         state,
-        pickup_address=address_text,
-        pickup_lat=geocode_result.lat,
-        pickup_lon=geocode_result.lon,
+        dropoff_address=address_text,
+        dropoff_lat=geocode_result.lat,
+        dropoff_lon=geocode_result.lon,
     )
-    await state.set_state(P2PStates.waiting_for_dropoff_location)
-    await message.answer(P2P_DROPOFF_PROMPT, reply_markup=_location_keyboard())
+    await _finish_points_and_check_zone(message, state, settings)
 
 
 @router.message(StateFilter(P2PStates.waiting_for_dropoff_location), F.location)
@@ -339,6 +424,19 @@ async def on_p2p_dropoff_manual_chosen(message: Message, state: FSMContext) -> N
     await message.answer(ORDER_MANUAL_ADDRESS_PROMPT, reply_markup=ReplyKeyboardRemove())
 
 
+@router.message(StateFilter(P2PStates.waiting_for_dropoff_location), F.text)
+async def on_p2p_dropoff_text_as_address(
+    message: Message, state: FSMContext, geocoding: GeocodingAdapter, settings: Settings
+) -> None:
+    """Зеркало on_p2p_pickup_text_as_address для точки Б — см. его
+    docstring."""
+    address_text = message.text.strip()
+    if not address_text:
+        await message.answer(P2P_UNEXPECTED_INPUT_IN_LOCATION_STEP)
+        return
+    await _process_dropoff_address_text(message, state, geocoding, settings, address_text)
+
+
 @router.message(StateFilter(P2PStates.waiting_for_dropoff_location))
 async def on_p2p_dropoff_unexpected_input(message: Message) -> None:
     await message.answer(P2P_UNEXPECTED_INPUT_IN_LOCATION_STEP)
@@ -348,22 +446,7 @@ async def on_p2p_dropoff_unexpected_input(message: Message) -> None:
 async def on_p2p_dropoff_manual_address_received(
     message: Message, state: FSMContext, geocoding: GeocodingAdapter, settings: Settings
 ) -> None:
-    address_text = message.text.strip()
-    geocode_result = await geocoding.geocode(address_text)
-    if geocode_result is None:
-        await message.answer(ORDER_ADDRESS_NOT_FOUND)
-        return
-
-    if geocode_result.partial_match:
-        await message.answer(ORDER_ADDRESS_PARTIAL_MATCH_WARNING)
-
-    await _update_p2p_draft(
-        state,
-        dropoff_address=address_text,
-        dropoff_lat=geocode_result.lat,
-        dropoff_lon=geocode_result.lon,
-    )
-    await _finish_points_and_check_zone(message, state, settings)
+    await _process_dropoff_address_text(message, state, geocoding, settings, message.text.strip())
 
 
 # ---------------------------------------------------------------------- #

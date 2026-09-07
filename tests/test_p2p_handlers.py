@@ -15,8 +15,11 @@ from handlers.p2p import (
     on_p2p_contact_received,
     on_p2p_description_received,
     on_p2p_dropoff_location_received,
+    on_p2p_dropoff_text_as_address,
     on_p2p_entry,
+    on_p2p_late_photo_attached,
     on_p2p_pickup_location_received,
+    on_p2p_pickup_text_as_address,
     on_p2p_submit,
 )
 from services.geocoding import GeocodeResult
@@ -207,6 +210,67 @@ async def test_description_received_moves_to_pickup_step():
     data = await state.get_data()
     assert data[P2P_DRAFT_KEY]["description"] == "Забрать документы у консьержа"
     assert message.answer.call_args.args[0] == P2P_DROPOFF_PROMPT or True  # прошли дальше
+
+
+@pytest.mark.asyncio
+async def test_late_photo_attached_after_description_is_saved_to_draft():
+    """Живой баг из тестирования: клиент отправил текст описания, а
+    фото прикрепил ОТДЕЛЬНЫМ следующим сообщением, уже находясь на
+    шаге ввода точки А — раньше такое фото молча терялось."""
+    photo = MagicMock()
+    photo.file_id = "AgACLatePhoto123"
+    message = _make_message(photo=[photo])
+    state = _make_state({P2P_DRAFT_KEY: {"description": "Забрать документы"}})
+
+    await on_p2p_late_photo_attached(message, state)
+
+    data = await state.get_data()
+    assert data[P2P_DRAFT_KEY]["photo_file_id"] == "AgACLatePhoto123"
+    assert data[P2P_DRAFT_KEY]["description"] == "Забрать документы"  # не затёрли остальное
+    message.answer.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_pickup_text_as_address_works_without_pressing_button():
+    """Живой фидбэк из тестирования: раньше текст адреса принимался
+    ТОЛЬКО после явного нажатия [✏️ Ввести адрес] — прямой ввод без
+    нажатия кнопки попадал в "неожиданный ввод". Теперь работает и так,
+    и так."""
+    message = _make_message(text="Antalya A")
+    state = _make_state({P2P_DRAFT_KEY: {"description": "x"}})
+    geocoding = _make_geocoding(geocode_result=GeocodeResult(lat=ANTALYA_LAT, lon=ANTALYA_LON, partial_match=False))
+
+    await on_p2p_pickup_text_as_address(message, state, geocoding)
+
+    data = await state.get_data()
+    assert data[P2P_DRAFT_KEY]["pickup_address"] == "Antalya A"
+    state.set_state.assert_awaited_once_with(P2PStates.waiting_for_dropoff_location)
+
+
+@pytest.mark.asyncio
+async def test_dropoff_text_as_address_works_without_pressing_button(valid_settings_kwargs):
+    """Зеркало теста для точки Б."""
+    settings = _make_settings(valid_settings_kwargs)
+    message = _make_message(text="Antalya B")
+    state = _make_state(
+        {
+            P2P_DRAFT_KEY: {
+                "description": "x",
+                "pickup_address": "Antalya A",
+                "pickup_lat": ANTALYA_LAT,
+                "pickup_lon": ANTALYA_LON,
+            }
+        }
+    )
+    geocoding = _make_geocoding(
+        geocode_result=GeocodeResult(lat=ANTALYA_LAT + 0.01, lon=ANTALYA_LON + 0.01, partial_match=False)
+    )
+
+    await on_p2p_dropoff_text_as_address(message, state, geocoding, settings)
+
+    data = await state.get_data()
+    assert data[P2P_DRAFT_KEY]["dropoff_address"] == "Antalya B"
+    state.set_state.assert_awaited_once_with(P2PStates.waiting_for_contact)
 
 
 # ------------------------------------------------------------------ #
