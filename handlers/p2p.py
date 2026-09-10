@@ -749,12 +749,17 @@ async def cmd_approve_p2p(
     lock_key = P2P_ADMIN_ACTION_LOCK_KEY_TEMPLATE.format(order_id=order_id)
     lock_acquired = await redis.set(lock_key, "1", nx=True, ex=P2P_ADMIN_ACTION_LOCK_TTL_SECONDS)
     if not lock_acquired:
+        logger.info("p2p_approve_blocked_by_lock: order_id=%s admin_id=%s", order_id, message.from_user.id)
         await message.answer(ADMIN_P2P_ACTION_IN_PROGRESS_MESSAGE)
         return
 
     try:
         order = await sheets.get_order(order_id)
         if order is None or order.get("status") != "pending_review":
+            logger.info(
+                "p2p_approve_not_found: order_id=%s admin_id=%s order_status=%r",
+                order_id, message.from_user.id, order.get("status") if order else None,
+            )
             await message.answer(ADMIN_P2P_NOT_FOUND_MESSAGE)
             return
 
@@ -855,12 +860,17 @@ async def cmd_reject_p2p(
     lock_key = P2P_ADMIN_ACTION_LOCK_KEY_TEMPLATE.format(order_id=order_id)
     lock_acquired = await redis.set(lock_key, "1", nx=True, ex=P2P_ADMIN_ACTION_LOCK_TTL_SECONDS)
     if not lock_acquired:
+        logger.info("p2p_reject_blocked_by_lock: order_id=%s admin_id=%s", order_id, message.from_user.id)
         await message.answer(ADMIN_P2P_ACTION_IN_PROGRESS_MESSAGE)
         return
 
     try:
         order = await sheets.get_order(order_id)
         if order is None or order.get("status") != "pending_review":
+            logger.info(
+                "p2p_reject_not_found: order_id=%s admin_id=%s order_status=%r",
+                order_id, message.from_user.id, order.get("status") if order else None,
+            )
             await message.answer(ADMIN_P2P_NOT_FOUND_MESSAGE)
             return
 
@@ -930,6 +940,10 @@ async def on_p2p_reject_reason_received(
         if order is None or order.get("status") != "pending_review":
             # Заказ мог измениться, пока Админ печатал причину — например,
             # кто-то другой успел одобрить его за это время.
+            logger.info(
+                "p2p_reject_followup_not_found: order_id=%s admin_id=%s order_status=%r",
+                order_id, message.from_user.id, order.get("status") if order else None,
+            )
             await message.answer(ADMIN_P2P_NOT_FOUND_MESSAGE)
             return
 
