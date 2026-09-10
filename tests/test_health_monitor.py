@@ -51,6 +51,15 @@ def _clear_registry():
     health_monitor._registry.clear()
 
 
+@pytest.fixture(autouse=True)
+def _no_real_sleep(monkeypatch):
+    """Живой баг из прод-эксплуатации привёл к добавлению одной
+    повторной попытки с паузой _RETRY_DELAY_SECONDS (см.
+    services/health_monitor.py) — тесты не должны реально ждать эти
+    секунды при каждом прогоне провальной проверки."""
+    monkeypatch.setattr(health_monitor.asyncio, "sleep", AsyncMock())
+
+
 @pytest.mark.asyncio
 async def test_periodic_health_check_all_ok_does_not_notify(valid_settings_kwargs):
     bot = _make_bot()
@@ -122,3 +131,38 @@ async def test_periodic_health_check_never_raises_even_on_failure(valid_settings
     )
 
     await health_monitor.run_periodic_health_check()  # не должно бросить исключение
+
+
+@pytest.mark.asyncio
+async def test_transient_sheets_failure_is_forgiven_by_retry(valid_settings_kwargs):
+    """Живой баг из прод-эксплуатации: разовый тайм-аут Google Sheets
+    API дал ложный алерт Админу при полностью здоровой системе. Теперь
+    первая неудачная попытка не должна приводить к алерту, если вторая
+    (после паузы) прошла успешно."""
+    bot = _make_bot()
+    settings = _make_settings(valid_settings_kwargs)
+    sheets = MagicMock()
+    sheets.health_check = AsyncMock(side_effect=[Exception("временный затык"), None])
+    health_monitor.register_dependencies(bot, _make_redis(), sheets, _make_geocoding(), settings)
+
+    await health_monitor.run_periodic_health_check()
+
+    assert sheets.health_check.await_count == 2
+    bot.send_message.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_persistent_sheets_failure_still_notifies_after_retry(valid_settings_kwargs):
+    """А устойчивую проблему (падает и вторая попытка тоже) ретрай
+    маскировать не должен — Админ всё равно должен узнать."""
+    bot = _make_bot()
+    settings = _make_settings(valid_settings_kwargs)
+    sheets = _make_sheets(raise_error=True)  # падает на КАЖДОМ вызове
+    health_monitor.register_dependencies(bot, _make_redis(), sheets, _make_geocoding(), settings)
+
+    await health_monitor.run_periodic_health_check()
+
+    assert sheets.health_check.await_count == 2  # обе попытки были сделаны
+    bot.send_message.assert_awaited()
+    text = bot.send_message.call_args_list[0].args[1]
+    assert "Google Sheets" in text
