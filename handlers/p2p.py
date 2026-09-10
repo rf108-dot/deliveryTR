@@ -55,6 +55,7 @@ from services.zone import haversine_distance_km, is_point_in_zone
 from states.user_states import P2PStates
 from utils.timefmt import now_local_str
 from texts.ru import (
+    ADMIN_P2P_ACTION_IN_PROGRESS_MESSAGE,
     ADMIN_P2P_APPROVED_ACK,
     ADMIN_P2P_NOT_FOUND_MESSAGE,
     ADMIN_P2P_REJECTED_ACK,
@@ -116,6 +117,19 @@ P2P_SUBMIT_LOCK_KEY_TEMPLATE = "p2p_submit_lock:{user_id}"
 # handlers/order.py (см. подробный комментарий там) — защита от
 # двойного тапа "Отправить на проверку".
 P2P_SUBMIT_LOCK_TTL_SECONDS = 30
+
+# Живой баг из тестирования: та же гонка состояний, что и утреннее
+# дублирование заказов — между проверкой "статус ещё pending_review" и
+# фактической записью нового статуса в cmd_approve_p2p/cmd_reject_p2p
+# проходит ощутимое время (уведомление клиента, запись события, сама
+# диспетчеризация курьерам для approve), и два быстрых повтора команды
+# (двойной тап/ретрай Telegram/нетерпеливый Админ) успевают ОБА пройти
+# проверку до того, как первый вызов её изменит — заказ уходит
+# курьерам дважды. Ключ на order_id (не на admin_id) — защищает и от
+# гонки между ДВУМЯ РАЗНЫМИ админами, решившими одновременно
+# обработать один и тот же заказ.
+P2P_ADMIN_ACTION_LOCK_KEY_TEMPLATE = "p2p_admin_action_lock:{order_id}"
+P2P_ADMIN_ACTION_LOCK_TTL_SECONDS = 30
 
 
 def _service_status_message(status: ServiceStatus, settings: Settings) -> str:
@@ -732,45 +746,54 @@ async def cmd_approve_p2p(
         return
     order_id, _reason = parsed
 
-    order = await sheets.get_order(order_id)
-    if order is None or order.get("status") != "pending_review":
-        await message.answer(ADMIN_P2P_NOT_FOUND_MESSAGE)
+    lock_key = P2P_ADMIN_ACTION_LOCK_KEY_TEMPLATE.format(order_id=order_id)
+    lock_acquired = await redis.set(lock_key, "1", nx=True, ex=P2P_ADMIN_ACTION_LOCK_TTL_SECONDS)
+    if not lock_acquired:
+        await message.answer(ADMIN_P2P_ACTION_IN_PROGRESS_MESSAGE)
         return
 
-    cancel_p2p_review_reminder(scheduler, order_id)
+    try:
+        order = await sheets.get_order(order_id)
+        if order is None or order.get("status") != "pending_review":
+            await message.answer(ADMIN_P2P_NOT_FOUND_MESSAGE)
+            return
 
-    client_user_id = order.get("user_id")
-    if client_user_id:
-        try:
-            await bot.send_message(int(client_user_id), P2P_APPROVED_CLIENT_MESSAGE)
-        except TelegramBadRequest as exc:
-            logger.warning("Не удалось уведомить клиента об одобрении P2P-заказа %s: %s", order_id, exc)
+        cancel_p2p_review_reminder(scheduler, order_id)
 
-    logger.info("p2p_admin_approved: order_id=%s admin_id=%s", order_id, message.from_user.id)
-    await sheets.append_event(
-        event_type="p2p_admin_approved",
-        actor_role="admin",
-        actor_id=str(message.from_user.id),
-        order_id=order_id,
-    )
+        client_user_id = order.get("user_id")
+        if client_user_id:
+            try:
+                await bot.send_message(int(client_user_id), P2P_APPROVED_CLIENT_MESSAGE)
+            except TelegramBadRequest as exc:
+                logger.warning("Не удалось уведомить клиента об одобрении P2P-заказа %s: %s", order_id, exc)
 
-    await send_offer_to_couriers(
-        bot,
-        sheets,
-        redis,
-        settings,
-        scheduler,
-        order_id=order_id,
-        merchant_name="",
-        merchant_description="",
-        delivery_address="",
-        total_try="",
-        p2p_pickup_address=order.get("pickup_address", ""),
-        p2p_dropoff_address=order.get("dropoff_address", ""),
-        p2p_description=order.get("p2p_description", ""),
-    )
+        logger.info("p2p_admin_approved: order_id=%s admin_id=%s", order_id, message.from_user.id)
+        await sheets.append_event(
+            event_type="p2p_admin_approved",
+            actor_role="admin",
+            actor_id=str(message.from_user.id),
+            order_id=order_id,
+        )
 
-    await message.answer(ADMIN_P2P_APPROVED_ACK)
+        await send_offer_to_couriers(
+            bot,
+            sheets,
+            redis,
+            settings,
+            scheduler,
+            order_id=order_id,
+            merchant_name="",
+            merchant_description="",
+            delivery_address="",
+            total_try="",
+            p2p_pickup_address=order.get("pickup_address", ""),
+            p2p_dropoff_address=order.get("dropoff_address", ""),
+            p2p_description=order.get("p2p_description", ""),
+        )
+
+        await message.answer(ADMIN_P2P_APPROVED_ACK)
+    finally:
+        await redis.delete(lock_key)
 
 
 async def _reject_p2p_order(
@@ -819,6 +842,7 @@ async def cmd_reject_p2p(
     scheduler: AsyncIOScheduler,
     bot: Bot,
     state: FSMContext,
+    redis: Redis,
 ) -> None:
     if not message.from_user or message.from_user.id not in settings.admin_ids:
         return
@@ -828,23 +852,36 @@ async def cmd_reject_p2p(
         return
     order_id, reason = parsed
 
-    order = await sheets.get_order(order_id)
-    if order is None or order.get("status") != "pending_review":
-        await message.answer(ADMIN_P2P_NOT_FOUND_MESSAGE)
+    lock_key = P2P_ADMIN_ACTION_LOCK_KEY_TEMPLATE.format(order_id=order_id)
+    lock_acquired = await redis.set(lock_key, "1", nx=True, ex=P2P_ADMIN_ACTION_LOCK_TTL_SECONDS)
+    if not lock_acquired:
+        await message.answer(ADMIN_P2P_ACTION_IN_PROGRESS_MESSAGE)
         return
 
-    if not reason:
-        # Живой фидбэк из тестирования: та же находка, что и у
-        # /reject_custom_ в handlers/custom_order.py — голая команда
-        # без причины запрашивает текст и ждёт его следующим сообщением,
-        # вместо того чтобы сразу уходить клиенту шаблоном без объяснения.
-        await state.update_data(p2p_reject_target_order_id=order_id)
-        await state.set_state(P2PStates.waiting_for_reject_reason)
-        await message.answer(ADMIN_REJECT_P2P_REASON_PROMPT)
-        return
+    try:
+        order = await sheets.get_order(order_id)
+        if order is None or order.get("status") != "pending_review":
+            await message.answer(ADMIN_P2P_NOT_FOUND_MESSAGE)
+            return
 
-    await state.set_state(None)
-    await _reject_p2p_order(message, sheets, scheduler, bot, order_id, reason)
+        if not reason:
+            # Живой фидбэк из тестирования: та же находка, что и у
+            # /reject_custom_ в handlers/custom_order.py — голая команда
+            # без причины запрашивает текст и ждёт его следующим сообщением,
+            # вместо того чтобы сразу уходить клиенту шаблоном без объяснения.
+            # Лок НЕ держим через весь период ожидания — снимаем сразу же в
+            # finally ниже, как только показали приглашение; повторная его
+            # выдача (короткая) происходит в on_p2p_reject_reason_received
+            # непосредственно перед самой записью.
+            await state.update_data(p2p_reject_target_order_id=order_id)
+            await state.set_state(P2PStates.waiting_for_reject_reason)
+            await message.answer(ADMIN_REJECT_P2P_REASON_PROMPT)
+            return
+
+        await state.set_state(None)
+        await _reject_p2p_order(message, sheets, scheduler, bot, order_id, reason)
+    finally:
+        await redis.delete(lock_key)
 
 
 @router.message(StateFilter(P2PStates.waiting_for_reject_reason), F.text)
@@ -855,13 +892,19 @@ async def on_p2p_reject_reason_received(
     scheduler: AsyncIOScheduler,
     bot: Bot,
     state: FSMContext,
+    redis: Redis,
 ) -> None:
     """Продолжение cmd_reject_p2p — см. docstring
     P2PStates.waiting_for_reject_reason. Регистрация ПОСЛЕ cmd_approve_p2p/
     cmd_reject_p2p обязательна (та же причина, что в handlers/support.py
     и handlers/custom_order.py): новая команда /approve_p2p_/reject_p2p_
     во время ожидания причины должна попасть в соответствующий cmd_*,
-    а не быть проглочена этим хендлером."""
+    а не быть проглочена этим хендлером.
+
+    Здесь берём СВОЙ, отдельный (короткий) лок непосредственно перед
+    самой записью — тот же order_id, что и в cmd_approve_p2p/
+    cmd_reject_p2p, поэтому конкурентный /approve_p2p_[того же id]
+    (пока Админ печатает причину) тоже будет с ним считаться."""
     if not message.from_user or message.from_user.id not in settings.admin_ids:
         return
 
@@ -876,6 +919,22 @@ async def on_p2p_reject_reason_received(
         await message.answer(ADMIN_REJECT_P2P_REASON_PROMPT)
         return
 
-    await state.set_state(None)
-    await state.update_data(p2p_reject_target_order_id=None)
-    await _reject_p2p_order(message, sheets, scheduler, bot, order_id, reason)
+    lock_key = P2P_ADMIN_ACTION_LOCK_KEY_TEMPLATE.format(order_id=order_id)
+    lock_acquired = await redis.set(lock_key, "1", nx=True, ex=P2P_ADMIN_ACTION_LOCK_TTL_SECONDS)
+    if not lock_acquired:
+        await message.answer(ADMIN_P2P_ACTION_IN_PROGRESS_MESSAGE)
+        return
+
+    try:
+        order = await sheets.get_order(order_id)
+        if order is None or order.get("status") != "pending_review":
+            # Заказ мог измениться, пока Админ печатал причину — например,
+            # кто-то другой успел одобрить его за это время.
+            await message.answer(ADMIN_P2P_NOT_FOUND_MESSAGE)
+            return
+
+        await state.set_state(None)
+        await state.update_data(p2p_reject_target_order_id=None)
+        await _reject_p2p_order(message, sheets, scheduler, bot, order_id, reason)
+    finally:
+        await redis.delete(lock_key)

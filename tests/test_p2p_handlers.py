@@ -27,6 +27,7 @@ from services.geocoding import GeocodeResult
 from services.sheets import Courier, SheetsWriteError
 from states.user_states import P2PStates
 from texts.ru import (
+    ADMIN_P2P_ACTION_IN_PROGRESS_MESSAGE,
     ADMIN_P2P_APPROVED_ACK,
     ADMIN_P2P_NOT_FOUND_MESSAGE,
     ADMIN_P2P_REJECTED_ACK,
@@ -551,7 +552,100 @@ async def test_approve_happy_path_dispatches_and_notifies_client(valid_settings_
     mock_dispatch.assert_awaited_once()
     assert mock_dispatch.await_args.kwargs["order_id"] == "043"
     assert mock_dispatch.await_args.kwargs["p2p_pickup_address"] == "A"
-    message.answer.assert_awaited_once_with(ADMIN_P2P_APPROVED_ACK)
+
+
+@pytest.mark.asyncio
+async def test_approve_second_concurrent_call_is_blocked_by_lock(valid_settings_kwargs, monkeypatch):
+    """
+    Живой баг из тестирования: два почти одновременных /approve_p2p_[id]
+    оба проходили проверку "статус ещё pending_review" (первый вызов ещё
+    не успел записать новый статус) и запускали диспетчеризацию курьерам
+    ДВАЖДЫ. Теперь второй вызов должен блокироваться Redis-локом, не
+    доходя до send_offer_to_couriers."""
+    message = _make_message(text="/approve_p2p_043")
+    message.from_user = MagicMock(id=ADMIN_ID)
+    settings = _make_settings(valid_settings_kwargs)
+    order = {
+        "order_id": "043", "status": "pending_review", "user_id": str(CLIENT_ID),
+        "pickup_address": "A", "dropoff_address": "B", "p2p_description": "x",
+    }
+    sheets = _make_sheets(order=order)
+    redis = _make_redis()
+    redis.set = AsyncMock(return_value=None)  # лок уже занят первым вызовом
+    bot = _make_bot()
+    scheduler = _make_scheduler()
+    mock_dispatch = AsyncMock()
+    monkeypatch.setattr("handlers.p2p.send_offer_to_couriers", mock_dispatch)
+
+    await cmd_approve_p2p(message, settings, sheets, redis, bot, scheduler)
+
+    mock_dispatch.assert_not_called()
+    bot.send_message.assert_not_called()
+    message.answer.assert_awaited_once_with(ADMIN_P2P_ACTION_IN_PROGRESS_MESSAGE)
+
+
+@pytest.mark.asyncio
+async def test_reject_second_concurrent_call_is_blocked_by_lock(valid_settings_kwargs):
+    """Зеркало теста выше для /reject_p2p_."""
+    message = _make_message(text="/reject_p2p_043 причина")
+    message.from_user = MagicMock(id=ADMIN_ID)
+    settings = _make_settings(valid_settings_kwargs)
+    order = {"order_id": "043", "status": "pending_review", "user_id": str(CLIENT_ID)}
+    sheets = _make_sheets(order=order)
+    scheduler = _make_scheduler()
+    bot = _make_bot()
+    state = _make_state()
+    redis = _make_redis()
+    redis.set = AsyncMock(return_value=None)  # лок уже занят
+
+    await cmd_reject_p2p(message, settings, sheets, scheduler, bot, state, redis)
+
+    sheets.update_order_fields.assert_not_called()
+    bot.send_message.assert_not_called()
+    message.answer.assert_awaited_once_with(ADMIN_P2P_ACTION_IN_PROGRESS_MESSAGE)
+
+
+@pytest.mark.asyncio
+async def test_approve_releases_lock_after_success(valid_settings_kwargs, monkeypatch):
+    """Лок должен сниматься после успешного одобрения — иначе Админ не
+    сможет повторно взаимодействовать с этим order_id ещё 30 секунд."""
+    message = _make_message(text="/approve_p2p_043")
+    message.from_user = MagicMock(id=ADMIN_ID)
+    settings = _make_settings(valid_settings_kwargs)
+    order = {
+        "order_id": "043", "status": "pending_review", "user_id": str(CLIENT_ID),
+        "pickup_address": "A", "dropoff_address": "B", "p2p_description": "x",
+    }
+    sheets = _make_sheets(order=order)
+    redis = _make_redis()
+    bot = _make_bot()
+    scheduler = _make_scheduler()
+    monkeypatch.setattr("handlers.p2p.send_offer_to_couriers", AsyncMock())
+
+    await cmd_approve_p2p(message, settings, sheets, redis, bot, scheduler)
+
+    redis.delete.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_reject_followup_reason_re_checks_status_before_writing(valid_settings_kwargs):
+    """Живой баг из тестирования: заказ мог измениться (например, кто-то
+    другой успел одобрить), пока Админ печатал причину отказа — запись
+    отклонения не должна произойти вслепую поверх уже изменённого статуса."""
+    state = _make_state({"p2p_reject_target_order_id": "043"})
+    message = _make_message(text="причина")
+    message.from_user = MagicMock(id=ADMIN_ID)
+    settings = _make_settings(valid_settings_kwargs)
+    order = {"order_id": "043", "status": "offered", "user_id": str(CLIENT_ID)}  # уже не pending_review
+    sheets = _make_sheets(order=order)
+    scheduler = _make_scheduler()
+    bot = _make_bot()
+    redis = _make_redis()
+
+    await on_p2p_reject_reason_received(message, settings, sheets, scheduler, bot, state, redis)
+
+    sheets.update_order_fields.assert_not_called()
+    message.answer.assert_awaited_once_with(ADMIN_P2P_NOT_FOUND_MESSAGE)
 
 
 @pytest.mark.asyncio
@@ -569,7 +663,7 @@ async def test_reject_happy_path_updates_status_and_notifies_client(valid_settin
     bot = _make_bot()
     state = _make_state()
 
-    await cmd_reject_p2p(message, settings, sheets, scheduler, bot, state)
+    await cmd_reject_p2p(message, settings, sheets, scheduler, bot, state, _make_redis())
 
     sheets.update_order_fields.assert_awaited_once_with(
         "043", {"status": "rejected", "cancel_reason": "крупногабаритный груз"}
@@ -595,7 +689,7 @@ async def test_reject_p2p_without_reason_prompts_and_remembers(valid_settings_kw
     bot = _make_bot()
     state = _make_state()
 
-    await cmd_reject_p2p(message, settings, sheets, scheduler, bot, state)
+    await cmd_reject_p2p(message, settings, sheets, scheduler, bot, state, _make_redis())
 
     bot.send_message.assert_not_called()
     sheets.update_order_fields.assert_not_called()
@@ -611,12 +705,12 @@ async def test_followup_p2p_reject_reason_completes_rejection(valid_settings_kwa
     message = _make_message(text="слишком большой груз для наших курьеров")
     message.from_user = MagicMock(id=ADMIN_ID)
     settings = _make_settings(valid_settings_kwargs)
-    order = {"order_id": "043", "status": "rejected", "user_id": str(CLIENT_ID)}
+    order = {"order_id": "043", "status": "pending_review", "user_id": str(CLIENT_ID)}
     sheets = _make_sheets(order=order)
     scheduler = _make_scheduler()
     bot = _make_bot()
 
-    await on_p2p_reject_reason_received(message, settings, sheets, scheduler, bot, state)
+    await on_p2p_reject_reason_received(message, settings, sheets, scheduler, bot, state, _make_redis())
 
     sheets.update_order_fields.assert_awaited_once_with(
         "043", {"status": "rejected", "cancel_reason": "слишком большой груз для наших курьеров"}
@@ -640,6 +734,6 @@ async def test_followup_p2p_reject_reason_from_non_admin_is_ignored(valid_settin
     scheduler = _make_scheduler()
     bot = _make_bot()
 
-    await on_p2p_reject_reason_received(message, settings, sheets, scheduler, bot, state)
+    await on_p2p_reject_reason_received(message, settings, sheets, scheduler, bot, state, _make_redis())
 
     bot.send_message.assert_not_called()
