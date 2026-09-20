@@ -146,17 +146,25 @@ def build_shift_keyboard(on_shift: bool) -> ReplyKeyboardMarkup:
 
 
 def _active_order_keyboard(order_id: str) -> InlineKeyboardMarkup:
+    """
+    Живой баг из тестирования: "📦 Забрал заказ" и "✅ Доставил" раньше
+    стояли в ОДНОМ ряду, деля ширину экрана пополам — на узких экранах
+    длинный текст первой кнопки визуально обрезался ("Заб..."). Теперь
+    каждая кнопка на всю ширину, по одной в ряд.
+    """
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
                     text=COURIER_PICKED_UP_BUTTON,
                     callback_data=f"{PICKED_UP_CALLBACK_PREFIX}{order_id}",
-                ),
+                )
+            ],
+            [
                 InlineKeyboardButton(
                     text=COURIER_DELIVERED_BUTTON,
                     callback_data=f"{DELIVERED_CALLBACK_PREFIX}{order_id}",
-                ),
+                )
             ],
             [
                 InlineKeyboardButton(
