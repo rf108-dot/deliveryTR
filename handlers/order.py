@@ -362,8 +362,37 @@ async def on_manual_address_chosen(message: Message, state: FSMContext) -> None:
     await message.answer(ORDER_MANUAL_ADDRESS_PROMPT, reply_markup=ReplyKeyboardRemove())
 
 
+@router.message(StateFilter(OrderStates.waiting_for_location), F.text)
+async def on_location_text_as_address(
+    message: Message,
+    state: FSMContext,
+    geocoding: GeocodingAdapter,
+    settings: Settings,
+    sheets: SheetsClient,
+) -> None:
+    """
+    Живой фидбэк из тестирования P2P (см. handlers/p2p.py::
+    on_p2p_pickup_text_as_address — тот же баг там же чинился раньше
+    сегодня, и он оказался не перенесён сюда, в обычный заказ): раньше
+    на шаге "Поделитесь геолокацией" бот принимал текст ТОЛЬКО после
+    явного нажатия кнопки [✏️ Ввести адрес вручную] — набранный сразу,
+    без нажатия, адрес попадал в catch-all "неожиданный ввод". Кнопка
+    по-прежнему работает (см. on_manual_address_chosen выше — она
+    просто ведёт в тот же результат другим путём), но теперь и прямой
+    ввод текста, минуя кнопку, тоже принимается.
+    """
+    address_text = message.text.strip()
+    if not address_text:
+        await message.answer(ORDER_UNEXPECTED_INPUT_IN_LOCATION_STEP)
+        return
+    await _process_manual_address_text(message, state, geocoding, settings, sheets, address_text)
+
+
 @router.message(StateFilter(OrderStates.waiting_for_location))
 async def on_unexpected_input_in_location_step(message: Message) -> None:
+    """С учётом on_location_text_as_address (выше, ловит F.text раньше)
+    сюда доходят только по-настоящему нераспознаваемые типы ввода —
+    стикеры, голосовые, документы и т.п."""
     await message.answer(ORDER_UNEXPECTED_INPUT_IN_LOCATION_STEP)
 
 
@@ -393,15 +422,14 @@ async def on_address_edit(query: CallbackQuery, state: FSMContext) -> None:
     await query.answer()
 
 
-@router.message(StateFilter(OrderStates.waiting_for_manual_address), F.text)
-async def on_manual_address_received(
+async def _process_manual_address_text(
     message: Message,
     state: FSMContext,
     geocoding: GeocodingAdapter,
     settings: Settings,
     sheets: SheetsClient,
+    address_text: str,
 ) -> None:
-    address_text = message.text.strip()
     geocode_result = await geocoding.geocode(address_text)
     if geocode_result is None:
         await message.answer(ORDER_ADDRESS_NOT_FOUND)
@@ -444,6 +472,19 @@ async def on_manual_address_received(
         address_partial_match=geocode_result.partial_match,
     )
     await _request_contact(message, state, from_user=message.from_user)
+
+
+@router.message(StateFilter(OrderStates.waiting_for_manual_address), F.text)
+async def on_manual_address_received(
+    message: Message,
+    state: FSMContext,
+    geocoding: GeocodingAdapter,
+    settings: Settings,
+    sheets: SheetsClient,
+) -> None:
+    await _process_manual_address_text(
+        message, state, geocoding, settings, sheets, message.text.strip()
+    )
 
 
 @router.callback_query(
