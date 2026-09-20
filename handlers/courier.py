@@ -725,7 +725,6 @@ async def on_problem(
             courier_name=order.get("courier_name", ""),
             courier_phone=order.get("courier_phone", ""),
         ),
-        exclude_user_id=client_user_id or None,
     )
 
     if client_user_id:
