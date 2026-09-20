@@ -154,6 +154,30 @@ def _active_order_keyboard(order_id: str) -> InlineKeyboardMarkup:
     )
 
 
+def _picked_up_keyboard(order_id: str) -> InlineKeyboardMarkup:
+    """Клавиатура ПОСЛЕ успешного «Забрал» — без самой кнопки «Забрал»
+    (она больше не актуальный следующий шаг). Живой баг из
+    тестирования: раньше карточка после «Забрал» не менялась вообще
+    (ни текст, ни клавиатура), курьер не видел подтверждения и жал
+    кнопку повторно — см. on_picked_up ниже."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=COURIER_DELIVERED_BUTTON,
+                    callback_data=f"{DELIVERED_CALLBACK_PREFIX}{order_id}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text=COURIER_PROBLEM_BUTTON,
+                    callback_data=f"{PROBLEM_CALLBACK_PREFIX}{order_id}",
+                )
+            ],
+        ]
+    )
+
+
 from utils.telegram_safety import resilient
 from utils.telegram_safety import safe_answer as _safe_answer
 
@@ -488,6 +512,20 @@ async def on_picked_up(
         await _safe_answer(query, COURIER_ORDER_NOT_FOUND_MESSAGE, show_alert=True)
         return
 
+    if order.get("status") != "assigned":
+        # Живой баг из тестирования: раньше здесь не было такой проверки
+        # (в отличие от on_delivered ниже, у которого гейт по статусу
+        # УЖЕ был) — карточка после успешного «Забрал» визуально не
+        # менялась вообще, курьер не видел подтверждения и жал кнопку
+        # ещё раз. Каждое такое повторное нажатие заново пересчитывало
+        # delivery_timeout (сдвигая дедлайн доставки вперёд при каждом
+        # лишнем тапе) и заново слало клиенту «Курьер... везёт ваш
+        # заказ» — отсюда несколько одинаковых сообщений подряд. Теперь
+        # повторное нажатие на уже обработанный заказ просто тихо
+        # подтверждается без повторной обработки.
+        await _safe_answer(query, COURIER_PICKED_UP_ACK)
+        return
+
     await sheets.update_order_fields(
         order_id, {"status": "picked_up", "timestamp_picked_up": now_local_str(settings)}
     )
@@ -523,6 +561,20 @@ async def on_picked_up(
             )
         except (TelegramBadRequest, ValueError):
             logger.warning("Не удалось уведомить клиента %s о заказе %s", user_id, order_id)
+
+    # Живой баг из тестирования (см. комментарий выше про проверку
+    # статуса): правим саму карточку курьеру, чтобы явно показать, что
+    # «Забрал» зарегистрирован — без этого нажатие выглядело так, будто
+    # ничего не произошло, и провоцировало повторные тапы. Кнопку
+    # «Забрал» из клавиатуры убираем (см. _picked_up_keyboard) — она
+    # больше не актуальный следующий шаг.
+    try:
+        await query.message.edit_text(
+            f"{query.message.text}\n\n✅ {COURIER_PICKED_UP_ACK}",
+            reply_markup=_picked_up_keyboard(order_id),
+        )
+    except TelegramBadRequest:
+        pass
 
     await _safe_answer(query, COURIER_PICKED_UP_ACK)
 
