@@ -123,6 +123,20 @@ PROBLEM_CALLBACK_PREFIX = "courier_problem:"
 # ---------------------------------------------------------------------- #
 
 
+def _courier_order_route(order: dict) -> tuple[str, str]:
+    """
+    (откуда, куда) для карточки активного заказа курьеру. Живой баг из
+    тестирования: карточка всегда читала merchant_name/delivery_address
+    напрямую — но у P2P-заказов (order_kind="p2p") эти колонки ВСЕГДА
+    пустые, там вместо них используются pickup_address/dropoff_address.
+    Из-за этого карточка P2P-заказа показывала пустоту между "—" и "→"
+    (сползающий, визуально сломанный текст).
+    """
+    if order.get("order_kind") == "p2p":
+        return order.get("pickup_address", ""), order.get("dropoff_address", "")
+    return order.get("merchant_name", ""), order.get("delivery_address", "")
+
+
 def build_shift_keyboard(on_shift: bool) -> ReplyKeyboardMarkup:
     """Персистентная кнопка-переключатель (ТЗ §8.1) — показывает
     ПРОТИВОПОЛОЖНОЕ текущему состоянию действие: если сейчас на смене,
@@ -373,8 +387,9 @@ async def on_take_order(
             # повторно показываем текущее состояние активного заказа,
             # не пугая ложным "уже принят другим курьером".
             order = await sheets.get_order(order_id)
-            merchant_name = order.get("merchant_name", "") if order else ""
-            delivery_address = order.get("delivery_address", "") if order else ""
+            merchant_name, delivery_address = (
+                _courier_order_route(order) if order else ("", "")
+            )
             await _safe_answer(query)
             await query.message.answer(
                 COURIER_ACTIVE_ORDER_TEMPLATE.format(
@@ -454,8 +469,7 @@ async def on_take_order(
             pass
 
         order = await sheets.get_order(order_id)
-        merchant_name = order.get("merchant_name", "") if order else ""
-        delivery_address = order.get("delivery_address", "") if order else ""
+        merchant_name, delivery_address = _courier_order_route(order) if order else ("", "")
         client_user_id = order.get("user_id", "") if order else ""
         await query.message.answer(
             COURIER_ACTIVE_ORDER_TEMPLATE.format(
