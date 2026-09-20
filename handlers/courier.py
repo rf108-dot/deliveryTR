@@ -576,7 +576,13 @@ async def on_picked_up(
     except TelegramBadRequest:
         pass
 
-    await _safe_answer(query, COURIER_PICKED_UP_ACK)
+    # Живой фидбэк из тестирования: обычный (не-alert) ответ на callback
+    # рендерится Telegram как маленький, быстро исчезающий тост сверху
+    # экрана — курьер его не замечал и жал кнопку повторно, несмотря на
+    # то что карточка уже была отредактирована (см. edit_text выше).
+    # show_alert=True даёт полноценное модальное окно, которое нужно
+    # явно закрыть — пропустить его гораздо сложнее.
+    await _safe_answer(query, COURIER_PICKED_UP_ACK, show_alert=True)
 
 
 @router.callback_query(F.data.startswith(DELIVERED_CALLBACK_PREFIX))
