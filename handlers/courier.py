@@ -716,15 +716,24 @@ async def on_problem(
     cancel_delivery_timeout(scheduler, order_id)
 
     client_user_id = order.get("user_id", "")
+    admin_text = ADMIN_MERCHANT_PROBLEM_TEMPLATE.format(
+        order_id=order_id,
+        merchant_name=order.get("merchant_name", ""),
+        courier_name=order.get("courier_name", ""),
+        courier_phone=order.get("courier_phone", ""),
+    )
+    # Подсказка админу, что делать с заказом на паузе: команды из
+    # handlers/admin.py (/assign_ и /cancel_), нажимаемые в Telegram.
+    hint_lines = ["", "Что дальше:"]
+    courier_id = order.get("courier_id", "")
+    if courier_id:
+        hint_lines.append(f"▶️ Вернуть заказ курьеру: /assign_{order_id}_{courier_id}")
+    hint_lines.append(f"❌ Отменить заказ: /cancel_{order_id}")
+    admin_text = admin_text + "\n" + "\n".join(hint_lines)
     await notify_admins(
         bot,
         settings,
-        ADMIN_MERCHANT_PROBLEM_TEMPLATE.format(
-            order_id=order_id,
-            merchant_name=order.get("merchant_name", ""),
-            courier_name=order.get("courier_name", ""),
-            courier_phone=order.get("courier_phone", ""),
-        ),
+        admin_text,
     )
 
     if client_user_id:
