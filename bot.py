@@ -30,6 +30,7 @@ from handlers import (
     courier,
     custom_order,
     fallback,
+    merchant,
     order,
     p2p,
     payment,
@@ -125,6 +126,11 @@ def build_dispatcher(storage: RedisStorage) -> Dispatcher:
     dp.include_router(support.router)
     dp.include_router(payment.router)
     dp.include_router(admin.router)
+    # ТЗ v2.3 §8A: модуль ресторана (самообслуживание меню). Роль
+    # проверяется по Telegram ID внутри самих хендлеров (см.
+    # handlers/merchant.py), как и у courier/admin — порядок среди них
+    # не важен, роутеры не пересекаются по типам апдейтов.
+    dp.include_router(merchant.router)
 
     # ВАЖНО: строго последним — "страховочный" ответ на любое сообщение,
     # не попавшее ни в один хендлер выше (Day 4 hotfix, живой фидбэк).

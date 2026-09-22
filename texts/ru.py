@@ -670,3 +670,58 @@ ADMIN_BROADCAST_CANCEL_BUTTON = "Отмена"
 ADMIN_BROADCAST_CANCELLED_ACK = "Рассылка отменена."
 ADMIN_BROADCAST_DONE_TEMPLATE = "✅ Рассылка завершена: доставлено {sent}, не удалось {failed}."
 CLIENT_BROADCAST_PREFIX = "📢 "
+
+
+# ---------------------------------------------------------------------- #
+# Ресторан — модуль самообслуживания (ТЗ v2.3, §8A)
+# ---------------------------------------------------------------------- #
+
+MERCHANT_MENU_BUTTON = "📋 Моё меню"
+
+MERCHANT_NOT_REGISTERED_MESSAGE = (
+    "Этот раздел доступен только представителям ресторана, "
+    "подключённым к самообслуживанию меню. Если это ошибка — "
+    "обратитесь к администратору."
+)
+
+MERCHANT_MENU_HEADER_TEMPLATE = "📋 Меню «{merchant_name}»"
+MERCHANT_MENU_ALREADY_CONFIRMED_LINE = "🟢 Меню подтверждено на сегодня"
+MERCHANT_MENU_EMPTY_MESSAGE = "Пока нет ни одной позиции в меню."
+MERCHANT_ITEM_LINE_TEMPLATE = "{status} {name} — {price:g} ₺"
+
+MERCHANT_MENU_CONFIRM_BUTTON = "✅ Подтвердить меню на сегодня"
+MERCHANT_MENU_CONFIRMED_ACK = "Меню подтверждено на сегодня."
+
+MERCHANT_ITEM_UNAVAILABLE_BUTTON = "✗ Нет сегодня"
+MERCHANT_ITEM_AVAILABLE_BUTTON = "✓ Есть снова"
+MERCHANT_ITEM_MARKED_UNAVAILABLE_ACK_TEMPLATE = "«{name}» отмечена как недоступная сегодня."
+MERCHANT_ITEM_MARKED_AVAILABLE_ACK_TEMPLATE = "«{name}» снова доступна."
+MERCHANT_ITEM_NOT_FOUND_MESSAGE = "Эта позиция не найдена в вашем меню."
+
+MERCHANT_ADD_ITEM_BUTTON = "➕ Добавить позицию"
+MERCHANT_ADD_ITEM_NAME_PROMPT = "Название новой позиции?"
+MERCHANT_ADD_ITEM_DESCRIPTION_PROMPT = "Короткое описание / состав?"
+MERCHANT_ADD_ITEM_PRICE_PROMPT = "Цена в лирах (₺), например 250 или 199.90?"
+MERCHANT_ADD_ITEM_INVALID_PRICE_MESSAGE = "Не получилось распознать цену. Введите число, например 250."
+MERCHANT_ADD_ITEM_SUMMARY_TEMPLATE = (
+    "Новая позиция:\n\n"
+    "«{name}»\n"
+    "{description}\n"
+    "{price:g} ₺\n\n"
+    "Сохранить?"
+)
+MERCHANT_ADD_ITEM_SAVE_BUTTON = "✅ Сохранить"
+MERCHANT_ADD_ITEM_EDIT_BUTTON = "✏️ Изменить"
+MERCHANT_ADD_ITEM_RESTARTED_MESSAGE = "Хорошо, начнём заново."
+MERCHANT_ADD_ITEM_DONE_TEMPLATE = (
+    "Готово: «{name}» добавлена в меню, {price:g} ₺.\n"
+    "Фото добавит администратор."
+)
+
+ADMIN_MERCHANT_MENU_CONFIRMED_TEMPLATE = "🟢 «{merchant_name}» подтвердил меню на сегодня."
+ADMIN_MERCHANT_ITEM_UNAVAILABLE_TEMPLATE = "🔴 «{merchant_name}»: «{item_name}» нет сегодня."
+ADMIN_MERCHANT_ITEM_ADDED_TEMPLATE = (
+    "🆕 Ресторан добавил «{name}», {price:g} ₺.\n"
+    "Добавьте фото в Google Sheets.\n"
+    "Отключить при необходимости: /toggle_item_{item_id}"
+)

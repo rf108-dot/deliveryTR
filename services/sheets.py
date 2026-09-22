@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 import uuid
 from dataclasses import dataclass
@@ -129,6 +130,11 @@ class Merchant:
     is_active: bool
     today_confirmed: bool
     working_hours: str
+    # ТЗ v2.3, §8A.1: Telegram ID представителей ресторана (колонка
+    # merchant_telegram_ids листа «Мерчанты», несколько ID через запятую).
+    # Пусто — меню ведёт Админ. Поле в конце и с дефолтом, чтобы не
+    # ломать существующие вызовы Merchant(...).
+    merchant_telegram_ids: tuple[str, ...] = ()
 
     @property
     def is_visible(self) -> bool:
@@ -192,6 +198,42 @@ def _to_float(value: str, default: float = 0.0) -> float:
         return float(str(value).strip().replace(",", "."))
     except (ValueError, AttributeError):
         return default
+
+
+def _parse_id_list(value: str) -> tuple[str, ...]:
+    """«123, 456;789» -> ("123", "456", "789"). Только цифры (Telegram ID
+    числовые) — случайный текст/пустые куски отбрасываются."""
+    return tuple(part for part in re.split(r"[,;\s]+", str(value).strip()) if part.isdigit())
+
+
+def _safe_cell(value: str) -> str:
+    """Текст от пользователя -> ячейка Google Sheets при USER_ENTERED.
+    Значение, начинающееся с = + - @, Sheets воспринял бы как формулу —
+    ведущий апостроф форсирует текстовый тип (апостроф не сохраняется в
+    самом значении ячейки, см. комментарий в append_order)."""
+    value = value.strip()
+    if value and value[0] in "=+-@":
+        return "'" + value
+    return value
+
+
+_ITEM_ID_PATTERN = re.compile(r"^item_(\d+)$")
+
+
+def _next_item_id(existing_ids: list[str]) -> str:
+    """Следующий item_id вида item_NNN: максимальный числовой суффикс среди
+    существующих item_<число> + 1. ID другого вида (если Админ заводил
+    вручную) в расчёте максимума игнорируются, но проверяются на занятость."""
+    taken = {i.strip() for i in existing_ids}
+    numbers = []
+    for item_id in taken:
+        m = _ITEM_ID_PATTERN.match(item_id)
+        if m:
+            numbers.append(int(m.group(1)))
+    n = (max(numbers) if numbers else 0) + 1
+    while f"item_{n:03d}" in taken:
+        n += 1
+    return f"item_{n:03d}"
 
 
 def _rows_to_dicts(rows: list[list[str]]) -> list[dict[str, str]]:
@@ -360,6 +402,10 @@ class SheetsClient:
         # batchUpdate — нет, им сериализация не нужна ни для потоко-
         # безопасности (см. _fresh_http), ни для корректности данных.
         self._append_lock = asyncio.Lock()
+        # ТЗ v2.3, §8A.4: add_item() сначала читает лист, чтобы выдать
+        # следующий item_id, затем дописывает строку — два одновременных
+        # добавления не должны получить один и тот же ID.
+        self._add_item_lock = asyncio.Lock()
 
     def _fresh_http(self) -> Any | None:
         """Изолированный HTTP-транспорт на один вызов — см. комментарий
@@ -540,6 +586,7 @@ class SheetsClient:
                     is_active=_to_bool(row.get("is_active", "")),
                     today_confirmed=_to_bool(row.get("today_confirmed", "")),
                     working_hours=_s(row.get("working_hours", "")),
+                    merchant_telegram_ids=_parse_id_list(row.get("merchant_telegram_ids", "")),
                 )
                 for row in _rows_to_dicts(values)
                 if row.get("merchant_id", "").strip()
@@ -652,8 +699,11 @@ class SheetsClient:
     # Запись (Day 4, ТЗ §4.2) — документ «Заказы»
     # ------------------------------------------------------------------ #
 
-    async def _append_row(self, sheet_name: str, row: list[str]) -> None:
-        """Низкоуровневая запись строки в документ «Заказы». Кидает
+    async def _append_row(
+        self, sheet_name: str, row: list[str], *, spreadsheet_id: str | None = None
+    ) -> None:
+        """Низкоуровневая запись строки (по умолчанию в документ «Заказы»;
+        spreadsheet_id — другой документ, например «Меню» для add_item). Кидает
         SheetsWriteError при любой ошибке — вызывающий код сам решает,
         критично ли это (см. append_event — best-effort, vs
         append_order — обязана дойти до вызывающего кода).
@@ -665,7 +715,7 @@ class SheetsClient:
         """
         async with self._append_lock:
             request = self._service.spreadsheets().values().append(
-                spreadsheetId=self._orders_spreadsheet_id,
+                spreadsheetId=spreadsheet_id or self._orders_spreadsheet_id,
                 range=sheet_name,
                 valueInputOption="USER_ENTERED",
                 insertDataOption="INSERT_ROWS",
@@ -896,6 +946,63 @@ class SheetsClient:
         async with self._items_lock:
             self._items_cache = None
         return True
+
+    async def add_item(
+        self,
+        *,
+        merchant_id: str,
+        name: str,
+        description: str,
+        price_try: float,
+        photo_url: str = "",
+        is_active: bool = True,
+        is_available: bool = True,
+    ) -> str:
+        """ТЗ v2.3, §8A.4 — новая позиция от ресторана: строка в лист
+        «Позиции» (документ «Меню»). Возвращает сгенерированный item_id.
+
+        Строка собирается ПО ЗАГОЛОВКУ листа (не по фиксированному порядку,
+        как в add_courier): порядок колонок «Позиции» Админ может менять
+        руками, незнакомые колонки останутся пустыми. Кидает
+        SheetsWriteError, если нет строки заголовка или нет обязательных
+        колонок item_id/merchant_id/name. Инвалидирует кеш позиций сразу
+        (новая позиция мгновенно видна в меню, ТЗ §8A.4)."""
+        async with self._add_item_lock:
+            values = await self._fetch_sheet_values_from(self._menu_spreadsheet_id, "Позиции")
+            if not values:
+                raise SheetsWriteError('В листе "Позиции" нет строки заголовка')
+            header = [h.strip() for h in values[0]]
+            missing = [c for c in ("item_id", "merchant_id", "name") if c not in header]
+            if missing:
+                raise SheetsWriteError(
+                    f'В листе "Позиции" нет обязательных колонок: {", ".join(missing)}'
+                )
+            existing_ids = [r.get("item_id", "") for r in _rows_to_dicts(values)]
+            item_id = _next_item_id(existing_ids)
+
+            # Целая цена — числом; дробная — текстом (апостроф), чтобы не
+            # зависеть от десятичного разделителя локали таблицы; при
+            # чтении _to_float понимает и точку, и запятую.
+            if price_try == int(price_try):
+                price_cell = str(int(price_try))
+            else:
+                price_cell = "'" + f"{price_try:.2f}"
+
+            cells = {
+                "item_id": item_id,
+                "merchant_id": merchant_id,
+                "name": _safe_cell(name),
+                "description": _safe_cell(description),
+                "price_try": price_cell,
+                "photo_url": photo_url,
+                "is_active": "TRUE" if is_active else "FALSE",
+                "is_available": "TRUE" if is_available else "FALSE",
+            }
+            row = [cells.get(column, "") for column in header]
+            await self._append_row("Позиции", row, spreadsheet_id=self._menu_spreadsheet_id)
+        async with self._items_lock:
+            self._items_cache = None
+        return item_id
 
     async def update_courier_fields(self, courier_id: str, fields: dict[str, str]) -> bool:
         """/toggle_courier_[id] (ТЗ §11) — точечное обновление листа
