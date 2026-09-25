@@ -161,6 +161,7 @@ async def main() -> None:
         [
             BotCommand(command="start", description="🍽 Заказать доставку"),
             BotCommand(command="shift_on", description="🛵 Я курьер, выйти на смену"),
+            BotCommand(command="my_menu", description="📋 Я ресторан, моё меню"),
             BotCommand(command="help", description="❓ Как пользоваться ботом"),
         ]
     )
