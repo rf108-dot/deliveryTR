@@ -13,11 +13,20 @@
 только позиции СВОЕГО merchant_id — see _get_merchant_for_telegram_id
 ниже и явную проверку item.merchant_id на каждом действии с позицией.
 
-§8A.2 Подтверждение позиций, §8A.3 «Сегодня нет» / «Есть снова»,
-§8A.4 Новые позиции (без фото — Админ добавляет photo_url в Google
-Sheets по текущей логике, ТЗ v2.3 допущение 4), §8A.5 Границы (ресторан
-НЕ меняет цену/описание существующих позиций, is_active мерчанта,
-категорию — таких хендлеров в этом файле намеренно нет),
+§8A.2 Подтверждение позиций, §8A.3 «Сегодня нет» / «Есть снова».
+
+РЕШЕНИЕ (живой фидбэк после теста): §8A.4 «Добавление новых позиций
+рестораном» сознательно НЕ реализовано в этом файле — функцию
+попробовали, она оказалась путающей для ресторана и всплыл смежный баг
+в handlers/admin.py (свободный текст названия позиции ломал
+HTML-сообщение в /toggle_item_). Решили не чинить, а убрать саму
+функцию: ресторан добавляет/удаляет позиции через прежний интерфейс
+(обращение к Админу), как было до ТЗ v2.3. services/sheets.py::add_item()
+при этом НЕ удалён — он не используется отсюда, но трогать sheets.py
+второй раз ради этого не стали.
+
+§8A.5 Границы: ресторан НЕ меняет цену/описание существующих позиций,
+is_active мерчанта, категорию — таких хендлеров в этом файле нет.
 §8A.6 События (actor_role="merchant").
 
 ВАЖНОЕ ОГРАНИЧЕНИЕ (пока не подключено): роль ресторана должна была бы
@@ -36,8 +45,7 @@ import html
 import logging
 
 from aiogram import Bot, F, Router
-from aiogram.filters import Command, StateFilter
-from aiogram.fsm.context import FSMContext
+from aiogram.filters import Command
 from aiogram.types import (
     CallbackQuery,
     InlineKeyboardButton,
@@ -50,21 +58,9 @@ from aiogram.types import (
 from config import Settings
 from services.notifications import notify_admins
 from services.sheets import Merchant, MenuItem, SheetsClient, items_for_merchant
-from states.merchant_states import MerchantStates
 from texts.ru import (
-    ADMIN_MERCHANT_ITEM_ADDED_TEMPLATE,
     ADMIN_MERCHANT_ITEM_UNAVAILABLE_TEMPLATE,
     ADMIN_MERCHANT_MENU_CONFIRMED_TEMPLATE,
-    MERCHANT_ADD_ITEM_BUTTON,
-    MERCHANT_ADD_ITEM_DESCRIPTION_PROMPT,
-    MERCHANT_ADD_ITEM_DONE_TEMPLATE,
-    MERCHANT_ADD_ITEM_EDIT_BUTTON,
-    MERCHANT_ADD_ITEM_INVALID_PRICE_MESSAGE,
-    MERCHANT_ADD_ITEM_NAME_PROMPT,
-    MERCHANT_ADD_ITEM_PRICE_PROMPT,
-    MERCHANT_ADD_ITEM_RESTARTED_MESSAGE,
-    MERCHANT_ADD_ITEM_SAVE_BUTTON,
-    MERCHANT_ADD_ITEM_SUMMARY_TEMPLATE,
     MERCHANT_ITEM_AVAILABLE_BUTTON,
     MERCHANT_ITEM_LINE_TEMPLATE,
     MERCHANT_ITEM_MARKED_AVAILABLE_ACK_TEMPLATE,
@@ -90,9 +86,6 @@ router = Router(name=__name__)
 MERCHANT_TOGGLE_UNAVAILABLE_CALLBACK_PREFIX = "merchant_item_off:"
 MERCHANT_TOGGLE_AVAILABLE_CALLBACK_PREFIX = "merchant_item_on:"
 MERCHANT_CONFIRM_MENU_CALLBACK_DATA = "merchant_confirm_menu"
-MERCHANT_ADD_ITEM_START_CALLBACK_DATA = "merchant_add_item_start"
-MERCHANT_ADD_ITEM_SAVE_CALLBACK_DATA = "merchant_add_item_save"
-MERCHANT_ADD_ITEM_EDIT_CALLBACK_DATA = "merchant_add_item_edit"
 
 _resilient = lambda handler: resilient(MERCHANT_NOT_REGISTERED_MESSAGE)(handler)  # noqa: E731
 
@@ -100,13 +93,13 @@ _resilient = lambda handler: resilient(MERCHANT_NOT_REGISTERED_MESSAGE)(handler)
 def _esc(value: object) -> str:
     """Экранирование для текста, который идёт в сообщение с
     parse_mode=HTML (DefaultBotProperties в bot.py — HTML для всего
-    бота). Название/описание позиции и название мерчанта — свободный
-    текст, введённый человеком (рестораном или Админом в Sheets); без
-    экранирования символ вроде "<" в названии ломает отправку сообщения
-    (Telegram вернёт "can't parse entities") или искажает разметку.
-    НЕ применяется к тексту инлайн-кнопок (они не парсятся как HTML) и
-    к тексту всплывающих алертов query.answer() (Telegram их тоже не
-    парсит как HTML) — там экранирование не нужно и не используется."""
+    бота). Название позиции и название мерчанта — свободный текст,
+    введённый человеком (Админом в Sheets); без экранирования символ
+    вроде "<" в названии ломает отправку сообщения (Telegram вернёт
+    "can't parse entities") или искажает разметку. НЕ применяется к
+    тексту инлайн-кнопок (они не парсятся как HTML) и к тексту
+    всплывающих алертов query.answer() (Telegram их тоже не парсит как
+    HTML) — там экранирование не нужно и не используется."""
     return html.escape(str(value), quote=False)
 
 
@@ -151,8 +144,8 @@ def build_merchant_keyboard() -> ReplyKeyboardMarkup:
 
 def _menu_keyboard(items: list[MenuItem], *, menu_confirmed: bool) -> InlineKeyboardMarkup:
     """Клавиатура «Моё меню»: по одной строке-переключателю на позицию
-    (§8A.3), кнопка подтверждения меню, если ещё не подтверждено сегодня
-    (§8A.2), и кнопка добавления новой позиции (§8A.4)."""
+    (§8A.3) и кнопка подтверждения меню, если ещё не подтверждено
+    сегодня (§8A.2). Кнопки добавления позиции нет — §8A.4 убран."""
     rows: list[list[InlineKeyboardButton]] = []
     for item in items:
         if item.is_available:
@@ -182,25 +175,7 @@ def _menu_keyboard(items: list[MenuItem], *, menu_confirmed: bool) -> InlineKeyb
                 )
             ]
         )
-    rows.append(
-        [InlineKeyboardButton(text=MERCHANT_ADD_ITEM_BUTTON, callback_data=MERCHANT_ADD_ITEM_START_CALLBACK_DATA)]
-    )
     return InlineKeyboardMarkup(inline_keyboard=rows)
-
-
-def _confirm_new_item_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text=MERCHANT_ADD_ITEM_SAVE_BUTTON, callback_data=MERCHANT_ADD_ITEM_SAVE_CALLBACK_DATA
-                ),
-                InlineKeyboardButton(
-                    text=MERCHANT_ADD_ITEM_EDIT_BUTTON, callback_data=MERCHANT_ADD_ITEM_EDIT_CALLBACK_DATA
-                ),
-            ]
-        ]
-    )
 
 
 async def _render_menu(sheets: SheetsClient, merchant: Merchant) -> tuple[str, InlineKeyboardMarkup]:
@@ -361,136 +336,3 @@ async def on_item_unavailable(query: CallbackQuery, settings: Settings, sheets: 
 async def on_item_available(query: CallbackQuery, settings: Settings, sheets: SheetsClient, bot: Bot) -> None:
     item_id = query.data[len(MERCHANT_TOGGLE_AVAILABLE_CALLBACK_PREFIX):]
     await _toggle_item_availability(query, settings, sheets, bot, item_id=item_id, make_available=True)
-
-
-# ---------------------------------------------------------------------- #
-# §8A.4: «➕ Добавить позицию» — диалог (название → описание → цена →
-# подтверждение). Стиль намеренно совпадает с AdminStates.adding_courier_*
-# в handlers/admin.py (тот же тип диалога — несколько текстовых полей
-# подряд), включая отсутствие точечного try/except на запись в Sheets
-# (см. handlers/admin.py::on_add_courier_telegram_id — тот же паттерн:
-# ошибка проброс идёт наверх необработанной).
-# ---------------------------------------------------------------------- #
-
-
-@router.callback_query(F.data == MERCHANT_ADD_ITEM_START_CALLBACK_DATA)
-@_resilient
-async def on_add_item_start(query: CallbackQuery, state: FSMContext, settings: Settings, sheets: SheetsClient) -> None:
-    if not query.from_user:
-        await _safe_answer(query)
-        return
-    merchant = await _get_merchant_for_telegram_id(sheets, query.from_user.id)
-    if merchant is None:
-        await _safe_answer(query, MERCHANT_NOT_REGISTERED_MESSAGE, show_alert=True)
-        return
-    await state.update_data(merchant_new_item_merchant_id=merchant.merchant_id)
-    await state.set_state(MerchantStates.adding_item_name)
-    if query.message:
-        await query.message.answer(MERCHANT_ADD_ITEM_NAME_PROMPT)
-    await _safe_answer(query)
-
-
-@router.message(StateFilter(MerchantStates.adding_item_name), F.text)
-async def on_add_item_name(message: Message, state: FSMContext) -> None:
-    await state.update_data(merchant_new_item_name=message.text.strip())
-    await state.set_state(MerchantStates.adding_item_description)
-    await message.answer(MERCHANT_ADD_ITEM_DESCRIPTION_PROMPT)
-
-
-@router.message(StateFilter(MerchantStates.adding_item_description), F.text)
-async def on_add_item_description(message: Message, state: FSMContext) -> None:
-    await state.update_data(merchant_new_item_description=message.text.strip())
-    await state.set_state(MerchantStates.adding_item_price)
-    await message.answer(MERCHANT_ADD_ITEM_PRICE_PROMPT)
-
-
-@router.message(StateFilter(MerchantStates.adding_item_price), F.text)
-async def on_add_item_price(message: Message, state: FSMContext) -> None:
-    raw = message.text.strip().replace(",", ".")
-    try:
-        price = float(raw)
-        if price <= 0:
-            raise ValueError
-    except ValueError:
-        await message.answer(MERCHANT_ADD_ITEM_INVALID_PRICE_MESSAGE)
-        return
-
-    await state.update_data(merchant_new_item_price=price)
-    await state.set_state(MerchantStates.confirming_new_item)
-    data = await state.get_data()
-    summary = MERCHANT_ADD_ITEM_SUMMARY_TEMPLATE.format(
-        name=_esc(data.get("merchant_new_item_name", "")),
-        description=_esc(data.get("merchant_new_item_description", "")),
-        price=price,
-    )
-    await message.answer(summary, reply_markup=_confirm_new_item_keyboard())
-
-
-@router.callback_query(StateFilter(MerchantStates.confirming_new_item), F.data == MERCHANT_ADD_ITEM_EDIT_CALLBACK_DATA)
-@_resilient
-async def on_add_item_edit(query: CallbackQuery, state: FSMContext) -> None:
-    # Простой перезапуск диалога с шага «название» — без пошагового
-    # возврата на конкретное поле (упрощение, см. предложенный план: в
-    # ТЗ явной раскладки «редактировать одно поле» не описано).
-    await state.set_state(MerchantStates.adding_item_name)
-    if query.message:
-        await query.message.answer(MERCHANT_ADD_ITEM_RESTARTED_MESSAGE)
-        await query.message.answer(MERCHANT_ADD_ITEM_NAME_PROMPT)
-    await _safe_answer(query)
-
-
-@router.callback_query(StateFilter(MerchantStates.confirming_new_item), F.data == MERCHANT_ADD_ITEM_SAVE_CALLBACK_DATA)
-@_resilient
-async def on_add_item_save(
-    query: CallbackQuery, state: FSMContext, settings: Settings, sheets: SheetsClient, bot: Bot
-) -> None:
-    if not query.from_user:
-        await _safe_answer(query)
-        return
-    data = await state.get_data()
-    merchant_id = data.get("merchant_new_item_merchant_id", "")
-    name = data.get("merchant_new_item_name", "")
-    description = data.get("merchant_new_item_description", "")
-    price = data.get("merchant_new_item_price", 0.0)
-
-    # Свежая проверка владения перед самой записью (§8A.1) — на случай,
-    # если доступ отозвали уже ПОСЛЕ того, как диалог начался.
-    merchant = await _get_merchant_for_telegram_id(sheets, query.from_user.id)
-    if merchant is None or merchant.merchant_id != merchant_id:
-        await _safe_answer(query, MERCHANT_NOT_REGISTERED_MESSAGE, show_alert=True)
-        await state.clear()
-        return
-
-    item_id = await sheets.add_item(
-        merchant_id=merchant_id,
-        name=name,
-        description=description,
-        price_try=price,
-    )
-    logger.info(
-        "merchant_item_added: item_id=%s merchant_id=%s telegram_id=%s",
-        item_id,
-        merchant_id,
-        query.from_user.id,
-    )
-    await sheets.append_event(
-        event_type="merchant_item_added",
-        actor_role="merchant",
-        actor_id=str(query.from_user.id),
-        order_id="",
-        details=f"item_id={item_id}",
-    )
-    await notify_admins(
-        bot,
-        settings,
-        ADMIN_MERCHANT_ITEM_ADDED_TEMPLATE.format(
-            item_id=item_id, name=_esc(name), price=price, merchant_name=_esc(merchant.name)
-        ),
-    )
-
-    await state.clear()
-    if query.message:
-        await query.message.edit_text(
-            MERCHANT_ADD_ITEM_DONE_TEMPLATE.format(name=_esc(name), price=price)
-        )
-    await _safe_answer(query)
