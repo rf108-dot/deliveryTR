@@ -32,6 +32,7 @@ start.py). Персистентная reply-клавиатура с кнопко
 
 from __future__ import annotations
 
+import html
 import logging
 
 from aiogram import Bot, F, Router
@@ -76,6 +77,7 @@ from texts.ru import (
     MERCHANT_MENU_CONFIRMED_ACK,
     MERCHANT_MENU_EMPTY_MESSAGE,
     MERCHANT_MENU_HEADER_TEMPLATE,
+    MERCHANT_MENU_OPENED_ACK,
     MERCHANT_NOT_REGISTERED_MESSAGE,
 )
 from utils.telegram_safety import resilient
@@ -93,6 +95,19 @@ MERCHANT_ADD_ITEM_SAVE_CALLBACK_DATA = "merchant_add_item_save"
 MERCHANT_ADD_ITEM_EDIT_CALLBACK_DATA = "merchant_add_item_edit"
 
 _resilient = lambda handler: resilient(MERCHANT_NOT_REGISTERED_MESSAGE)(handler)  # noqa: E731
+
+
+def _esc(value: object) -> str:
+    """Экранирование для текста, который идёт в сообщение с
+    parse_mode=HTML (DefaultBotProperties в bot.py — HTML для всего
+    бота). Название/описание позиции и название мерчанта — свободный
+    текст, введённый человеком (рестораном или Админом в Sheets); без
+    экранирования символ вроде "<" в названии ломает отправку сообщения
+    (Telegram вернёт "can't parse entities") или искажает разметку.
+    НЕ применяется к тексту инлайн-кнопок (они не парсятся как HTML) и
+    к тексту всплывающих алертов query.answer() (Telegram их тоже не
+    парсит как HTML) — там экранирование не нужно и не используется."""
+    return html.escape(str(value), quote=False)
 
 
 # ---------------------------------------------------------------------- #
@@ -190,7 +205,7 @@ def _confirm_new_item_keyboard() -> InlineKeyboardMarkup:
 
 async def _render_menu(sheets: SheetsClient, merchant: Merchant) -> tuple[str, InlineKeyboardMarkup]:
     items = items_for_merchant(await sheets.get_items(), merchant.merchant_id)
-    header = MERCHANT_MENU_HEADER_TEMPLATE.format(merchant_name=merchant.name)
+    header = MERCHANT_MENU_HEADER_TEMPLATE.format(merchant_name=_esc(merchant.name))
     if merchant.today_confirmed:
         header += "\n" + MERCHANT_MENU_ALREADY_CONFIRMED_LINE
     if not items:
@@ -198,7 +213,7 @@ async def _render_menu(sheets: SheetsClient, merchant: Merchant) -> tuple[str, I
     else:
         lines = [
             MERCHANT_ITEM_LINE_TEMPLATE.format(
-                name=item.name,
+                name=_esc(item.name),
                 price=item.price_try,
                 status="✅" if item.is_available else "⛔️",
             )
@@ -222,6 +237,11 @@ async def on_my_menu(message: Message, settings: Settings, sheets: SheetsClient)
     if merchant is None:
         await message.answer(MERCHANT_NOT_REGISTERED_MESSAGE)
         return
+    # Постоянная клавиатура едет ОТДЕЛЬНЫМ коротким сообщением — то же
+    # ограничение Telegram, что и у build_shift_keyboard в courier.py:
+    # reply-клавиатура и инлайн-клавиатура не могут быть на одном
+    # сообщении одновременно, а меню ниже — инлайн (кнопки по позициям).
+    await message.answer(MERCHANT_MENU_OPENED_ACK, reply_markup=build_merchant_keyboard())
     text, keyboard = await _render_menu(sheets, merchant)
     await message.answer(text, reply_markup=keyboard)
 
@@ -252,7 +272,7 @@ async def on_confirm_menu(query: CallbackQuery, settings: Settings, sheets: Shee
     await notify_admins(
         bot,
         settings,
-        ADMIN_MERCHANT_MENU_CONFIRMED_TEMPLATE.format(merchant_name=merchant.name),
+        ADMIN_MERCHANT_MENU_CONFIRMED_TEMPLATE.format(merchant_name=_esc(merchant.name)),
     )
 
     # Перечитываем мерчанта, чтобы клавиатура сразу отразила
@@ -313,7 +333,7 @@ async def _toggle_item_availability(
             bot,
             settings,
             ADMIN_MERCHANT_ITEM_UNAVAILABLE_TEMPLATE.format(
-                merchant_name=merchant.name, item_name=item.name
+                merchant_name=_esc(merchant.name), item_name=_esc(item.name)
             ),
         )
 
@@ -399,8 +419,8 @@ async def on_add_item_price(message: Message, state: FSMContext) -> None:
     await state.set_state(MerchantStates.confirming_new_item)
     data = await state.get_data()
     summary = MERCHANT_ADD_ITEM_SUMMARY_TEMPLATE.format(
-        name=data.get("merchant_new_item_name", ""),
-        description=data.get("merchant_new_item_description", ""),
+        name=_esc(data.get("merchant_new_item_name", "")),
+        description=_esc(data.get("merchant_new_item_description", "")),
         price=price,
     )
     await message.answer(summary, reply_markup=_confirm_new_item_keyboard())
@@ -463,10 +483,14 @@ async def on_add_item_save(
     await notify_admins(
         bot,
         settings,
-        ADMIN_MERCHANT_ITEM_ADDED_TEMPLATE.format(item_id=item_id, name=name, price=price),
+        ADMIN_MERCHANT_ITEM_ADDED_TEMPLATE.format(
+            item_id=item_id, name=_esc(name), price=price, merchant_name=_esc(merchant.name)
+        ),
     )
 
     await state.clear()
     if query.message:
-        await query.message.edit_text(MERCHANT_ADD_ITEM_DONE_TEMPLATE.format(name=name, price=price))
+        await query.message.edit_text(
+            MERCHANT_ADD_ITEM_DONE_TEMPLATE.format(name=_esc(name), price=price)
+        )
     await _safe_answer(query)

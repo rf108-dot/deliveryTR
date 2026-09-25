@@ -718,10 +718,20 @@ MERCHANT_ADD_ITEM_DONE_TEMPLATE = (
     "Фото добавит администратор."
 )
 
+# Отдельное короткое сообщение, которое несёт постоянную клавиатуру
+# «📋 Моё меню» (см. handlers/merchant.py::on_my_menu) — по тому же
+# паттерну, что build_shift_keyboard() у курьера в handlers/courier.py
+# (там keyboard тоже приезжает отдельным ack-сообщением, не вместе с
+# инлайн-кнопками).
+MERCHANT_MENU_OPENED_ACK = "📋 Открываю ваше меню:"
+
 ADMIN_MERCHANT_MENU_CONFIRMED_TEMPLATE = "🟢 «{merchant_name}» подтвердил меню на сегодня."
 ADMIN_MERCHANT_ITEM_UNAVAILABLE_TEMPLATE = "🔴 «{merchant_name}»: «{item_name}» нет сегодня."
+# ВАЖНО: {merchant_name} добавлен после живого теста — без него Админ не
+# мог понять, КАКОЙ ресторан добавил позицию, если самообслуживание
+# включено больше чем у одного мерчанта.
 ADMIN_MERCHANT_ITEM_ADDED_TEMPLATE = (
-    "🆕 Ресторан добавил «{name}», {price:g} ₺.\n"
+    "🆕 «{merchant_name}» добавил «{name}», {price:g} ₺.\n"
     "Добавьте фото в Google Sheets.\n"
     "Отключить при необходимости: /toggle_item_{item_id}"
 )
